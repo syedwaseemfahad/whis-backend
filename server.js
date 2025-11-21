@@ -11,6 +11,8 @@ const PORT = process.env.PORT || 4000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const APP_AUTH_TOKEN = process.env.APP_AUTH_TOKEN || "";
 const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/whis-app";
+const UI_API = process.env.UI_API || "https://syedwaseemfahad.github.io/whis-ai-site";
+
 
 // Cashfree Config
 const CASHFREE_APP_ID = process.env.CASHFREE_APP_ID;
@@ -171,7 +173,7 @@ app.post("/api/payment/create-order", async (req, res) => {
         customer_phone: "9999999999"
       },
       order_meta: {
-        return_url: `http://localhost:8000/payment.html?order_id=${orderId}`
+        return_url: `${UI_API}/payment.html?order_id=${orderId}`
       }
     };
 
