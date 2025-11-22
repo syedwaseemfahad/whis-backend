@@ -10,17 +10,19 @@ const mongoose = require("mongoose");
 const PORT = process.env.PORT || 4000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const APP_AUTH_TOKEN = process.env.APP_AUTH_TOKEN || "";
-const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/whis-app";
-const UI_API = process.env.UI_API || "https://syedwaseemfahad.github.io/whis-ai-site";
-
+const MONGODB_URI =
+  process.env.MONGODB_URI || "mongodb://localhost:27017/whis-app";
+const UI_API =
+  process.env.UI_API || "https://syedwaseemfahad.github.io/whis-ai-site";
 
 // Cashfree Config
 const CASHFREE_APP_ID = process.env.CASHFREE_APP_ID;
 const CASHFREE_SECRET_KEY = process.env.CASHFREE_SECRET_KEY;
-const CASHFREE_ENV = process.env.CASHFREE_ENV || "SANDBOX"; 
-const CASHFREE_URL = CASHFREE_ENV === "PRODUCTION" 
-  ? "https://api.cashfree.com/pg" 
-  : "https://sandbox.cashfree.com/pg";
+const CASHFREE_ENV = process.env.CASHFREE_ENV || "SANDBOX";
+const CASHFREE_URL =
+  CASHFREE_ENV === "PRODUCTION"
+    ? "https://api.cashfree.com/pg"
+    : "https://sandbox.cashfree.com/pg";
 
 if (!OPENAI_API_KEY) {
   console.error("⚠️ OPENAI_API_KEY missing in backend/.env");
@@ -30,12 +32,14 @@ const upload = multer();
 const app = express();
 
 app.use(cors());
-app.use(express.json());
+// IMPORTANT: allow bigger JSON payloads for screenshots
+app.use(express.json({ limit: "5mb" }));
 
 // --- 1. MongoDB Connection ---
-mongoose.connect(MONGODB_URI)
+mongoose
+  .connect(MONGODB_URI)
   .then(() => console.log("✅ Connected to MongoDB"))
-  .catch(err => console.error("❌ MongoDB connection error:", err));
+  .catch((err) => console.error("❌ MongoDB connection error:", err));
 
 // --- 2. User Schema (Updated with Tier/Cycle in Orders) ---
 const userSchema = new mongoose.Schema({
@@ -44,28 +48,46 @@ const userSchema = new mongoose.Schema({
   name: String,
   avatarUrl: String,
   subscription: {
-    status: { type: String, enum: ['active', 'inactive', 'past_due'], default: 'inactive' },
-    tier: { type: String, enum: ['free', 'pro', 'pro_plus'], default: 'free' },
-    cycle: { type: String, enum: ['monthly', 'annual'], default: 'monthly' },
+    status: {
+      type: String,
+      enum: ["active", "inactive", "past_due"],
+      default: "inactive"
+    },
+    tier: {
+      type: String,
+      enum: ["free", "pro", "pro_plus"],
+      default: "free"
+    },
+    cycle: {
+      type: String,
+      enum: ["monthly", "annual"],
+      default: "monthly"
+    },
     validUntil: Date
   },
-  orders: [{ 
-    orderId: String, 
-    amount: Number, 
-    date: Date, 
-    status: String,
-    tier: String,  // Storing tier here to verify later
-    cycle: String  // Storing cycle here
-  }],
+  orders: [
+    {
+      orderId: String,
+      amount: Number,
+      date: Date,
+      status: String,
+      tier: String, // Storing tier here to verify later
+      cycle: String // Storing cycle here
+    }
+  ],
   createdAt: { type: Date, default: Date.now },
   lastLogin: Date
 });
 
-const User = mongoose.model('User', userSchema);
+const User = mongoose.model("User", userSchema);
 
 // --------- Middleware ---------
 app.use((req, res, next) => {
-  if (req.path.startsWith("/api/auth") || req.path.startsWith("/api/user") || req.path.startsWith("/api/payment")) {
+  if (
+    req.path.startsWith("/api/auth") ||
+    req.path.startsWith("/api/user") ||
+    req.path.startsWith("/api/payment")
+  ) {
     return next();
   }
   if (!APP_AUTH_TOKEN) return next();
@@ -74,7 +96,6 @@ app.use((req, res, next) => {
 });
 
 const conversations = new Map();
-
 
 // ==========================================
 //  AUTH & USER APIs
@@ -85,8 +106,11 @@ app.post("/api/auth/google", async (req, res) => {
     const { token } = req.body;
     if (!token) return res.status(400).json({ error: "Missing google token" });
 
-    const googleRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${token}`);
-    if (!googleRes.ok) return res.status(401).json({ error: "Invalid Google Token" });
+    const googleRes = await fetch(
+      `https://oauth2.googleapis.com/tokeninfo?id_token=${token}`
+    );
+    if (!googleRes.ok)
+      return res.status(401).json({ error: "Invalid Google Token" });
 
     const payload = await googleRes.json();
     const { sub: googleId, email, name, picture: avatarUrl } = payload;
@@ -98,7 +122,10 @@ app.post("/api/auth/google", async (req, res) => {
         name,
         avatarUrl,
         lastLogin: new Date(),
-        $setOnInsert: { "subscription.status": "inactive", "subscription.tier": "free" }
+        $setOnInsert: {
+          "subscription.status": "inactive",
+          "subscription.tier": "free"
+        }
       },
       { new: true, upsert: true }
     );
@@ -118,12 +145,16 @@ app.get("/api/user/status", async (req, res) => {
     const user = await User.findOne({ googleId });
     if (!user) return res.json({ active: false, tier: null });
 
-    const isActive = user.subscription.status === 'active';
-    
+    const isActive = user.subscription.status === "active";
+
     if (isActive && user.subscription.validUntil && new Date() > user.subscription.validUntil) {
-        user.subscription.status = 'inactive';
-        await user.save();
-        return res.json({ active: false, tier: user.subscription.tier, expired: true });
+      user.subscription.status = "inactive";
+      await user.save();
+      return res.json({
+        active: false,
+        tier: user.subscription.tier,
+        expired: true
+      });
     }
 
     res.json({
@@ -137,7 +168,6 @@ app.get("/api/user/status", async (req, res) => {
   }
 });
 
-
 // ==========================================
 //  CASHFREE PAYMENTS (FIXED ANNUAL CALC)
 // ==========================================
@@ -145,20 +175,19 @@ app.get("/api/user/status", async (req, res) => {
 app.post("/api/payment/create-order", async (req, res) => {
   try {
     const { googleId, tier, cycle } = req.body; // cycle: 'monthly' or 'annual'
-    
+
     const user = await User.findOne({ googleId });
     if (!user) return res.status(404).json({ error: "User not found" });
 
     // --- PRICE CALCULATION ---
-    let amount = 1.00; 
+    let amount = 1.0;
 
-    if (tier === 'pro') {
-        if (cycle === 'annual') amount = 3588.00; // 299 * 12
-        else amount = 399.00;
-    } 
-    else if (tier === 'pro_plus') {
-        if (cycle === 'annual') amount = 7188.00; // 599 * 12
-        else amount = 999.00;
+    if (tier === "pro") {
+      if (cycle === "annual") amount = 3588.0; // 299 * 12
+      else amount = 399.0;
+    } else if (tier === "pro_plus") {
+      if (cycle === "annual") amount = 7188.0; // 599 * 12
+      else amount = 999.0;
     }
 
     const orderId = `order_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
@@ -192,21 +221,26 @@ app.post("/api/payment/create-order", async (req, res) => {
 
     if (!response.ok) {
       console.error("Cashfree Failed:", data);
-      return res.status(500).json({ error: data.message || "Payment creation failed" });
+      return res
+        .status(500)
+        .json({ error: data.message || "Payment creation failed" });
     }
 
     // Save pending order WITH tier and cycle info
-    user.orders.push({ 
-        orderId, 
-        amount, 
-        date: new Date(), 
-        status: "PENDING",
-        tier: tier,
-        cycle: cycle
+    user.orders.push({
+      orderId,
+      amount,
+      date: new Date(),
+      status: "PENDING",
+      tier: tier,
+      cycle: cycle
     });
     await user.save();
 
-    res.json({ payment_session_id: data.payment_session_id, order_id: orderId });
+    res.json({
+      payment_session_id: data.payment_session_id,
+      order_id: orderId
+    });
   } catch (err) {
     console.error("Create Order Error:", err);
     res.status(500).json({ error: "Internal server error" });
@@ -229,44 +263,54 @@ app.post("/api/payment/verify", async (req, res) => {
 
     if (data.order_status === "PAID") {
       const user = await User.findOne({ "orders.orderId": orderId });
-      
+
       if (user) {
         // Find the specific order to get the plan details
-        const order = user.orders.find(o => o.orderId === orderId);
-        
-        user.subscription.status = 'active';
-        
+        const order = user.orders.find((o) => o.orderId === orderId);
+
+        user.subscription.status = "active";
+
         // Use the tier/cycle saved during creation
         if (order && order.tier) {
-            user.subscription.tier = order.tier;
-            
-            // Calculate validity
-            const days = (order.cycle === 'annual') ? 365 : 30;
-            user.subscription.validUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+          user.subscription.tier = order.tier;
+
+          // Calculate validity
+          const days = order.cycle === "annual" ? 365 : 30;
+          user.subscription.validUntil = new Date(
+            Date.now() + days * 24 * 60 * 60 * 1000
+          );
         } else {
-            // Fallback logic if schema wasn't updated yet
-            if (data.order_amount >= 5000) {
-                user.subscription.tier = 'pro_plus'; // Annual Pro+
-                user.subscription.validUntil = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
-            } else if (data.order_amount >= 3000) {
-                user.subscription.tier = 'pro';      // Annual Pro
-                user.subscription.validUntil = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
-            } else if (data.order_amount >= 900) {
-                user.subscription.tier = 'pro_plus'; // Monthly Pro+
-                user.subscription.validUntil = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-            } else {
-                user.subscription.tier = 'pro';      // Monthly Pro
-                user.subscription.validUntil = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-            }
+          // Fallback logic if schema wasn't updated yet
+          if (data.order_amount >= 5000) {
+            user.subscription.tier = "pro_plus"; // Annual Pro+
+            user.subscription.validUntil = new Date(
+              Date.now() + 365 * 24 * 60 * 60 * 1000
+            );
+          } else if (data.order_amount >= 3000) {
+            user.subscription.tier = "pro"; // Annual Pro
+            user.subscription.validUntil = new Date(
+              Date.now() + 365 * 24 * 60 * 60 * 1000
+            );
+          } else if (data.order_amount >= 900) {
+            user.subscription.tier = "pro_plus"; // Monthly Pro+
+            user.subscription.validUntil = new Date(
+              Date.now() + 30 * 24 * 60 * 60 * 1000
+            );
+          } else {
+            user.subscription.tier = "pro"; // Monthly Pro
+            user.subscription.validUntil = new Date(
+              Date.now() + 30 * 24 * 60 * 60 * 1000
+            );
+          }
         }
 
-        if(order) order.status = "PAID";
+        if (order) order.status = "PAID";
 
         await user.save();
         return res.json({ status: "PAID", success: true });
       }
     }
-    
+
     res.json({ status: data.order_status, success: false });
   } catch (err) {
     console.error("Verify Error:", err);
@@ -274,81 +318,190 @@ app.post("/api/payment/verify", async (req, res) => {
   }
 });
 
-
 // ==========================================
 //  AI & TRANSCRIPTION APIs
 // ==========================================
 
 async function callOpenAI(path, options) {
   const url = `https://api.openai.com${path}`;
-  const headers = { Authorization: `Bearer ${OPENAI_API_KEY}`, ...(options.headers || {}) };
-  if (!(options.body instanceof FormData)) headers["Content-Type"] = "application/json";
+  const headers = {
+    Authorization: `Bearer ${OPENAI_API_KEY}`,
+    ...(options.headers || {})
+  };
+
+  // Only set JSON content-type when NOT sending FormData
+  if (!(options.body instanceof FormData)) {
+    headers["Content-Type"] = "application/json";
+  }
 
   const res = await fetch(url, { ...options, headers });
   const text = await res.text();
   let json;
-  try { json = JSON.parse(text); } catch { json = text; }
+  try {
+    json = JSON.parse(text);
+  } catch {
+    json = text;
+  }
 
   if (!res.ok) {
     console.error("OpenAI error:", res.status, json);
-    throw new Error(`OpenAI error ${res.status}: ${typeof json === 'string' ? json : JSON.stringify(json)}`);
+    throw new Error(
+      `OpenAI error ${res.status}: ${
+        typeof json === "string" ? json : JSON.stringify(json)
+      }`
+    );
   }
   return json;
 }
 
+// ---------- NON-STREAM CHAT (supports screenshot) ----------
 app.post("/api/chat", async (req, res) => {
-  // (Chat logic same as before)
   const { conversationId, message } = req.body || {};
-  if (!message || !message.role || !message.content) return res.status(400).json({ error: "Invalid Body" });
+  const role = message?.role;
+  const content = message?.content;
+  const screenshot = message?.screenshot;
+
+  if (!role || (!content && !screenshot)) {
+    return res.status(400).json({ error: "Invalid Body" });
+  }
+
   let convId = conversationId || `conv_${Date.now()}`;
   const history = conversations.get(convId) || [];
-  history.push({ role: message.role, content: message.content });
+
+  // Build multimodal message if screenshot present
+  let newMessage;
+  if (screenshot) {
+    const parts = [];
+    if (content) {
+      parts.push({ type: "text", text: content });
+    }
+    parts.push({
+      type: "image_url",
+      image_url: { url: screenshot }
+    });
+    newMessage = { role, content: parts };
+  } else {
+    newMessage = { role, content };
+  }
+
+  history.push(newMessage);
+
   try {
     const data = await callOpenAI("/v1/chat/completions", {
       method: "POST",
-      body: JSON.stringify({ model: "gpt-4o-mini", messages: history, temperature: 0.6 })
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: history,
+        temperature: 0.6
+      })
     });
+
     const reply = data.choices?.[0]?.message?.content || "";
     history.push({ role: "assistant", content: reply });
     conversations.set(convId, history);
+
     res.json({ reply, conversationId: convId });
-  } catch (err) { res.status(500).json({ error: "OpenAI failed" }); }
+  } catch (err) {
+    console.error("Chat Error:", err);
+    res.status(500).json({ error: "OpenAI failed" });
+  }
 });
 
+// ---------- STREAM CHAT (supports screenshot) ----------
 app.post("/api/chat-stream", async (req, res) => {
-  // (Stream logic same as before)
   const { conversationId, message } = req.body || {};
-  if (!message || !message.role || !message.content) return res.status(400).json({ error: "Invalid Body" });
+  const role = message?.role;
+  const content = message?.content;
+  const screenshot = message?.screenshot;
+
+  if (!role || (!content && !screenshot)) {
+    return res.status(400).json({ error: "Invalid Body" });
+  }
+
   let convId = conversationId || `conv_${Date.now()}`;
   const history = conversations.get(convId) || [];
-  history.push({ role: message.role, content: message.content });
+
+  let newMessage;
+  if (screenshot) {
+    const parts = [];
+    if (content) {
+      parts.push({ type: "text", text: content });
+    }
+    parts.push({
+      type: "image_url",
+      image_url: { url: screenshot }
+    });
+    newMessage = { role, content: parts };
+  } else {
+    newMessage = { role, content };
+  }
+
+  history.push(newMessage);
+  conversations.set(convId, history);
+
   res.setHeader("x-conversation-id", convId);
   res.setHeader("Content-Type", "text/plain; charset=utf-8");
   res.setHeader("Transfer-Encoding", "chunked");
+
   try {
-    const openaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model: "gpt-4o-mini", messages: history, temperature: 0.6, stream: true })
-    });
-    if (!openaiRes.ok) { res.statusCode = 500; res.end("OpenAI Error"); return; }
+    const openaiRes = await fetch(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model: "gpt-4o-mini",
+          messages: history,
+          temperature: 0.6,
+          stream: true
+        })
+      }
+    );
+
+    if (!openaiRes.ok || !openaiRes.body) {
+      console.error("OpenAI stream error:", openaiRes.status);
+      res.statusCode = 500;
+      res.end("OpenAI Error");
+      return;
+    }
+
     for await (const chunk of openaiRes.body) {
-       // (Streaming parse logic same as before)
-       res.write(chunk); 
+      res.write(chunk);
     }
     res.end();
-  } catch (err) { res.statusCode = 500; res.end("Stream Error"); }
+  } catch (err) {
+    console.error("Stream Error:", err);
+    res.statusCode = 500;
+    res.end("Stream Error");
+  }
 });
 
+// ---------- TRANSCRIBE ----------
 app.post("/api/transcribe", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "Missing file" });
+
     const formData = new FormData();
-    formData.append("file", new Blob([req.file.buffer], { type: "audio/wav" }), "audio.wav");
+    formData.append(
+      "file",
+      new Blob([req.file.buffer], { type: "audio/wav" }),
+      "audio.wav"
+    );
     formData.append("model", "whisper-1");
-    const data = await callOpenAI("/v1/audio/transcriptions", { method: "POST", body: formData });
+
+    const data = await callOpenAI("/v1/audio/transcriptions", {
+      method: "POST",
+      body: formData
+    });
+
     res.json({ text: data.text || "" });
-  } catch (err) { res.status(500).json({ error: "Whisper failed" }); }
+  } catch (err) {
+    console.error("Whisper Error:", err);
+    res.status(500).json({ error: "Whisper failed" });
+  }
 });
 
 app.listen(PORT, () => {
