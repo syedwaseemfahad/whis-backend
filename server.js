@@ -498,8 +498,10 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
       new Blob([req.file.buffer], { type: mime }),
       filename
     );
-    formData.append("model", "whisper-1");
-    // Force language to English for best accuracy in your use-case
+
+    // Use latest high-quality transcription model
+    // Options: gpt-4o-transcribe, gpt-4o-mini-transcribe, whisper-1 :contentReference[oaicite:1]{index=1}
+    formData.append("model", "gpt-4o-transcribe");
     formData.append("language", "en");
 
     const data = await callOpenAI("/v1/audio/transcriptions", {
@@ -509,8 +511,8 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
 
     res.json({ text: data.text || "" });
   } catch (err) {
-    console.error("Whisper Error:", err);
-    res.status(500).json({ error: "Whisper failed" });
+    console.error("Whisper/Transcribe Error:", err);
+    res.status(500).json({ error: "Transcription failed" });
   }
 });
 
