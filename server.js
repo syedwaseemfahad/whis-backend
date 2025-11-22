@@ -32,7 +32,7 @@ const upload = multer();
 const app = express();
 
 app.use(cors());
-// IMPORTANT: allow bigger JSON payloads for screenshots
+// Allow larger JSON payloads (for screenshots as base64 URLs)
 app.use(express.json({ limit: "5mb" }));
 
 // --- 1. MongoDB Connection ---
@@ -71,8 +71,8 @@ const userSchema = new mongoose.Schema({
       amount: Number,
       date: Date,
       status: String,
-      tier: String, // Storing tier here to verify later
-      cycle: String // Storing cycle here
+      tier: String,  // Storing tier here to verify later
+      cycle: String  // Storing cycle here
     }
   ],
   createdAt: { type: Date, default: Date.now },
@@ -83,6 +83,7 @@ const User = mongoose.model("User", userSchema);
 
 // --------- Middleware ---------
 app.use((req, res, next) => {
+  // Auth-free routes
   if (
     req.path.startsWith("/api/auth") ||
     req.path.startsWith("/api/user") ||
@@ -90,7 +91,7 @@ app.use((req, res, next) => {
   ) {
     return next();
   }
-  if (!APP_AUTH_TOKEN) return next();
+  // Keeping this simple, no strict APP_AUTH_TOKEN check right now
   if (req.method === "OPTIONS") return next();
   next();
 });
