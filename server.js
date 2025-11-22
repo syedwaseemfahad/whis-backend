@@ -41,7 +41,7 @@ mongoose
   .then(() => console.log("✅ Connected to MongoDB"))
   .catch((err) => console.error("❌ MongoDB connection error:", err));
 
-// --- 2. User Schema (Updated with Tier/Cycle in Orders) ---
+// --- 2. User Schema (Updated with Free Usage Tracking) ---
 const userSchema = new mongoose.Schema({
   googleId: { type: String, unique: true, required: true },
   email: { type: String, required: true },
@@ -65,14 +65,19 @@ const userSchema = new mongoose.Schema({
     },
     validUntil: Date
   },
+  // NEW: Track free usage server-side
+  freeUsage: {
+    count: { type: Number, default: 0 },
+    lastDate: { type: String } // Format: YYYY-MM-DD
+  },
   orders: [
     {
       orderId: String,
       amount: Number,
       date: Date,
       status: String,
-      tier: String, // Storing tier here to verify later
-      cycle: String // Storing cycle here
+      tier: String, 
+      cycle: String 
     }
   ],
   createdAt: { type: Date, default: Date.now },
@@ -91,12 +96,42 @@ app.use((req, res, next) => {
   ) {
     return next();
   }
-  // Keeping this simple, no strict APP_AUTH_TOKEN check right now
   if (req.method === "OPTIONS") return next();
   next();
 });
 
 const conversations = new Map();
+
+// --- Helper: Check & Increment Free Usage ---
+async function checkAndIncrementUsage(googleId) {
+  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  const user = await User.findOne({ googleId });
+  
+  if (!user) return { allowed: false, error: "User not found" };
+
+  // 1. If paid and active, allow unlimited
+  if (user.subscription.status === 'active' && ['pro', 'pro_plus'].includes(user.subscription.tier)) {
+    return { allowed: true, tier: user.subscription.tier };
+  }
+
+  // 2. Free tier logic
+  // Reset if new day
+  if (user.freeUsage.lastDate !== today) {
+    user.freeUsage.count = 0;
+    user.freeUsage.lastDate = today;
+  }
+
+  // Check limit (5 per day)
+  if (user.freeUsage.count >= 5) {
+    return { allowed: false, error: "Daily limit reached" };
+  }
+
+  // Increment
+  user.freeUsage.count += 1;
+  await user.save();
+  
+  return { allowed: true, tier: 'free', remaining: 5 - user.freeUsage.count };
+}
 
 // ==========================================
 //  AUTH & USER APIs
@@ -125,7 +160,9 @@ app.post("/api/auth/google", async (req, res) => {
         lastLogin: new Date(),
         $setOnInsert: {
           "subscription.status": "inactive",
-          "subscription.tier": "free"
+          "subscription.tier": "free",
+          "freeUsage.count": 0,
+          "freeUsage.lastDate": new Date().toISOString().slice(0, 10)
         }
       },
       { new: true, upsert: true }
@@ -174,12 +211,12 @@ app.get("/api/user/status", async (req, res) => {
 });
 
 // ==========================================
-//  CASHFREE PAYMENTS (FIXED ANNUAL CALC)
+//  CASHFREE PAYMENTS
 // ==========================================
 
 app.post("/api/payment/create-order", async (req, res) => {
   try {
-    const { googleId, tier, cycle } = req.body; // cycle: 'monthly' or 'annual'
+    const { googleId, tier, cycle } = req.body; 
 
     const user = await User.findOne({ googleId });
     if (!user) return res.status(404).json({ error: "User not found" });
@@ -188,10 +225,10 @@ app.post("/api/payment/create-order", async (req, res) => {
     let amount = 1.0;
 
     if (tier === "pro") {
-      if (cycle === "annual") amount = 3588.0; // 299 * 12
+      if (cycle === "annual") amount = 3588.0; 
       else amount = 399.0;
     } else if (tier === "pro_plus") {
-      if (cycle === "annual") amount = 7188.0; // 599 * 12
+      if (cycle === "annual") amount = 7188.0; 
       else amount = 999.0;
     }
 
@@ -231,7 +268,7 @@ app.post("/api/payment/create-order", async (req, res) => {
         .json({ error: data.message || "Payment creation failed" });
     }
 
-    // Save pending order WITH tier and cycle info
+    // Save pending order
     user.orders.push({
       orderId,
       amount,
@@ -270,43 +307,20 @@ app.post("/api/payment/verify", async (req, res) => {
       const user = await User.findOne({ "orders.orderId": orderId });
 
       if (user) {
-        // Find the specific order to get the plan details
         const order = user.orders.find((o) => o.orderId === orderId);
 
         user.subscription.status = "active";
 
-        // Use the tier/cycle saved during creation
         if (order && order.tier) {
           user.subscription.tier = order.tier;
-
-          // Calculate validity
           const days = order.cycle === "annual" ? 365 : 30;
           user.subscription.validUntil = new Date(
             Date.now() + days * 24 * 60 * 60 * 1000
           );
         } else {
-          // Fallback logic if schema wasn't updated yet
-          if (data.order_amount >= 5000) {
-            user.subscription.tier = "pro_plus"; // Annual Pro+
-            user.subscription.validUntil = new Date(
-              Date.now() + 365 * 24 * 60 * 60 * 1000
-            );
-          } else if (data.order_amount >= 3000) {
-            user.subscription.tier = "pro"; // Annual Pro
-            user.subscription.validUntil = new Date(
-              Date.now() + 365 * 24 * 60 * 60 * 1000
-            );
-          } else if (data.order_amount >= 900) {
-            user.subscription.tier = "pro_plus"; // Monthly Pro+
-            user.subscription.validUntil = new Date(
-              Date.now() + 30 * 24 * 60 * 60 * 1000
-            );
-          } else {
-            user.subscription.tier = "pro"; // Monthly Pro
-            user.subscription.validUntil = new Date(
-              Date.now() + 30 * 24 * 60 * 60 * 1000
-            );
-          }
+          // Fallback if tier/cycle not saved
+          user.subscription.tier = "pro";
+          user.subscription.validUntil = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
         }
 
         if (order) order.status = "PAID";
@@ -327,93 +341,18 @@ app.post("/api/payment/verify", async (req, res) => {
 //  AI & TRANSCRIPTION APIs
 // ==========================================
 
-async function callOpenAI(path, options) {
-  const url = `https://api.openai.com${path}`;
-  const headers = {
-    Authorization: `Bearer ${OPENAI_API_KEY}`,
-    ...(options.headers || {})
-  };
-
-  // Only set JSON content-type when NOT sending FormData
-  if (!(options.body instanceof FormData)) {
-    headers["Content-Type"] = "application/json";
-  }
-
-  const res = await fetch(url, { ...options, headers });
-  const text = await res.text();
-  let json;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    json = text;
-  }
-
-  if (!res.ok) {
-    console.error("OpenAI error:", res.status, json);
-    throw new Error(
-      `OpenAI error ${res.status}: ${
-        typeof json === "string" ? json : JSON.stringify(json)
-      }`
-    );
-  }
-  return json;
-}
-
-// ---------- NON-STREAM CHAT (supports screenshot) ----------
-app.post("/api/chat", async (req, res) => {
-  const { conversationId, message } = req.body || {};
-  const role = message?.role;
-  const content = message?.content;
-  const screenshot = message?.screenshot;
-
-  if (!role || (!content && !screenshot)) {
-    return res.status(400).json({ error: "Invalid Body" });
-  }
-
-  let convId = conversationId || `conv_${Date.now()}`;
-  const history = conversations.get(convId) || [];
-
-  // Build multimodal message if screenshot present
-  let newMessage;
-  if (screenshot) {
-    const parts = [];
-    if (content) {
-      parts.push({ type: "text", text: content });
-    }
-    parts.push({
-      type: "image_url",
-      image_url: { url: screenshot }
-    });
-    newMessage = { role, content: parts };
-  } else {
-    newMessage = { role, content };
-  }
-
-  history.push(newMessage);
-
-  try {
-    const data = await callOpenAI("/v1/chat/completions", {
-      method: "POST",
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: history,
-        temperature: 0.6
-      })
-    });
-
-    const reply = data.choices?.[0]?.message?.content || "";
-    history.push({ role: "assistant", content: reply });
-    conversations.set(convId, history);
-
-    res.json({ reply, conversationId: convId });
-  } catch (err) {
-    console.error("Chat Error:", err);
-    res.status(500).json({ error: "OpenAI failed" });
-  }
-});
-
-// ---------- STREAM CHAT (supports screenshot) ----------
+// ---------- STREAM CHAT (Enforces Limit) ----------
 app.post("/api/chat-stream", async (req, res) => {
+  const googleId = req.headers["x-google-id"];
+  
+  // 1. Check Usage Limit
+  if (googleId) {
+    const check = await checkAndIncrementUsage(googleId);
+    if (!check.allowed) {
+      return res.status(403).json({ error: "Daily limit reached. Please upgrade to Pro." });
+    }
+  }
+
   const { conversationId, message } = req.body || {};
   const role = message?.role;
   const content = message?.content;
@@ -466,10 +405,17 @@ app.post("/api/chat-stream", async (req, res) => {
       }
     );
 
-    if (!openaiRes.ok || !openaiRes.body) {
-      console.error("OpenAI stream error:", openaiRes.status);
+    if (!openaiRes.ok) {
+      const errText = await openaiRes.text();
+      console.error("OpenAI stream error:", openaiRes.status, errText);
       res.statusCode = 500;
-      res.end("OpenAI Error");
+      res.end(`OpenAI Error: ${openaiRes.status}`);
+      return;
+    }
+
+    if (!openaiRes.body) {
+      res.statusCode = 500;
+      res.end("No body from OpenAI");
       return;
     }
 
@@ -480,7 +426,7 @@ app.post("/api/chat-stream", async (req, res) => {
   } catch (err) {
     console.error("Stream Error:", err);
     res.statusCode = 500;
-    res.end("Stream Error");
+    res.end("Internal Stream Error");
   }
 });
 
@@ -499,19 +445,23 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
       filename
     );
 
-    // Use latest high-quality transcription model
-    // Options: gpt-4o-transcribe, gpt-4o-mini-transcribe, whisper-1 :contentReference[oaicite:1]{index=1}
-    formData.append("model", "gpt-4o-transcribe");
+    // Use gpt-4o-transcribe or whisper-1
+    formData.append("model", "gpt-4o-transcribe"); 
     formData.append("language", "en");
 
-    const data = await callOpenAI("/v1/audio/transcriptions", {
-      method: "POST",
-      body: formData
+    // Note: Using fetch to OpenAI here
+    const openaiRes = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
+        body: formData
     });
+    
+    const data = await openaiRes.json();
+    if (!openaiRes.ok) throw new Error(data.error?.message || "OpenAI Error");
 
     res.json({ text: data.text || "" });
   } catch (err) {
-    console.error("Whisper/Transcribe Error:", err);
+    console.error("Transcribe Error:", err);
     res.status(500).json({ error: "Transcription failed" });
   }
 });
