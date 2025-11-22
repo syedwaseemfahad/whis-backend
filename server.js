@@ -489,14 +489,17 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "Missing file" });
 
+    const mime = req.file.mimetype || "audio/webm";
+    const filename = req.file.originalname || "audio.webm";
+
     const formData = new FormData();
     formData.append(
       "file",
-      new Blob([req.file.buffer], { type: "audio/wav" }),
-      "audio.wav"
+      new Blob([req.file.buffer], { type: mime }),
+      filename
     );
     formData.append("model", "whisper-1");
-    // Force language to English for best accuracy
+    // Force language to English for best accuracy in your use-case
     formData.append("language", "en");
 
     const data = await callOpenAI("/v1/audio/transcriptions", {
