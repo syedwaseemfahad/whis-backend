@@ -71,8 +71,8 @@ const userSchema = new mongoose.Schema({
       amount: Number,
       date: Date,
       status: String,
-      tier: String,  // Storing tier here to verify later
-      cycle: String  // Storing cycle here
+      tier: String, // Storing tier here to verify later
+      cycle: String // Storing cycle here
     }
   ],
   createdAt: { type: Date, default: Date.now },
@@ -148,7 +148,11 @@ app.get("/api/user/status", async (req, res) => {
 
     const isActive = user.subscription.status === "active";
 
-    if (isActive && user.subscription.validUntil && new Date() > user.subscription.validUntil) {
+    if (
+      isActive &&
+      user.subscription.validUntil &&
+      new Date() > user.subscription.validUntil
+    ) {
       user.subscription.status = "inactive";
       await user.save();
       return res.json({
@@ -492,6 +496,8 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
       "audio.wav"
     );
     formData.append("model", "whisper-1");
+    // Force language to English for best accuracy
+    formData.append("language", "en");
 
     const data = await callOpenAI("/v1/audio/transcriptions", {
       method: "POST",
