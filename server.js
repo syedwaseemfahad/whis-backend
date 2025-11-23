@@ -23,6 +23,10 @@ const CASHFREE_URL = CASHFREE_ENV === "PRODUCTION"
     ? "https://api.cashfree.com/pg"
     : "https://sandbox.cashfree.com/pg";
 
+// High-accuracy STT model (you can override in .env)
+const STT_MODEL = process.env.STT_MODEL || "gpt-4o-mini-transcribe";
+// For absolute max quality, set: STT_MODEL=gpt-4o-transcribe in backend/.env
+
 if (!OPENAI_API_KEY) {
   console.error("⚠️ OPENAI_API_KEY missing in backend/.env");
 }
@@ -340,7 +344,7 @@ app.post("/api/chat-stream", async (req, res) => {
   }
 });
 
-// 6. TRANSCRIPTION
+// 6. TRANSCRIPTION (upgraded to gpt-4o* audio model)
 app.post("/api/transcribe", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "Missing file" });
@@ -349,18 +353,35 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
     const filename = req.file.originalname || "audio.webm";
 
     const formData = new FormData();
-    formData.append("file", new Blob([req.file.buffer], { type: mime }), filename);
-    formData.append("model", "whisper-1"); 
+    formData.append(
+      "file",
+      new Blob([req.file.buffer], { type: mime }),
+      filename
+    );
+
+    // Use high-accuracy OpenAI audio transcription model
+    formData.append("model", STT_MODEL);
+    // More literal, less "creative" → better for commands
+    formData.append("temperature", "0");
+    // Force language if you mostly speak English
     formData.append("language", "en");
+    // Give some context so it handles technical words better
+    formData.append(
+      "prompt",
+      "This is a conversation with an AI assistant about coding, Electron apps, product features, and technical topics."
+    );
 
     const openaiRes = await fetch("https://api.openai.com/v1/audio/transcriptions", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
-        body: formData
+      method: "POST",
+      headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
+      body: formData
     });
-    
+
     const data = await openaiRes.json();
-    if (!openaiRes.ok) throw new Error(data.error?.message || "OpenAI Error");
+    if (!openaiRes.ok) {
+      console.error("OpenAI Transcription Error:", data);
+      throw new Error(data.error?.message || "OpenAI Error");
+    }
 
     res.json({ text: data.text || "" });
   } catch (err) {
