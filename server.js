@@ -1,18 +1,14 @@
-// backend/server.js
 require("dotenv").config();
 
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
 const mongoose = require("mongoose");
-// If using Node < 18, uncomment: const fetch = require("node-fetch");
 
 // --- CONFIGURATION ---
 const PORT = process.env.PORT || 4000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/whis-app";
-
-// The URL where your frontend is hosted (for payment redirects)
 const UI_API = process.env.UI_API || "http://localhost:5500"; 
 
 // Cashfree Config
@@ -27,12 +23,10 @@ if (!OPENAI_API_KEY) {
   console.error("⚠️ OPENAI_API_KEY missing in backend/.env");
 }
 
-// Multer setup (using memory storage to handle buffers for OpenAI)
 const upload = multer({ storage: multer.memoryStorage() });
 const app = express();
 
 app.use(cors());
-// Increased limit to 50mb to handle high-res screenshots without crashing
 app.use(express.json({ limit: "50mb" }));
 
 // --- 1. MongoDB Connection ---
@@ -55,7 +49,7 @@ const userSchema = new mongoose.Schema({
   },
   freeUsage: {
     count: { type: Number, default: 0 },
-    lastDate: { type: String } // Format: YYYY-MM-DD
+    lastDate: { type: String }
   },
   orders: [
     {
@@ -75,7 +69,6 @@ const User = mongoose.model("User", userSchema);
 
 // --------- Middleware ---------
 app.use((req, res, next) => {
-  // Allow these routes without custom checks (Auth is handled inside them)
   if (
     req.path.startsWith("/api/auth") ||
     req.path.startsWith("/api/user") ||
@@ -89,22 +82,20 @@ app.use((req, res, next) => {
 
 const conversations = new Map();
 
-// --- Helper: Usage Check ---
+// --- Helper: Usage Check (UPDATED LIMIT TO 10) ---
 async function checkAndIncrementUsage(googleId) {
   const today = new Date().toISOString().slice(0, 10);
   const user = await User.findOne({ googleId });
-  
+   
   if (!user) return { allowed: false, error: "User not found" };
 
   // Check Paid Status
   if (user.subscription.status === 'active' && ['pro', 'pro_plus'].includes(user.subscription.tier)) {
      if (user.subscription.validUntil && new Date() > user.subscription.validUntil) {
-         // Expired
          user.subscription.status = 'inactive';
          user.subscription.tier = 'free';
          await user.save();
      } else {
-         // Active
          return { allowed: true, tier: user.subscription.tier };
      }
   }
@@ -115,24 +106,37 @@ async function checkAndIncrementUsage(googleId) {
     user.freeUsage.lastDate = today;
   }
 
-  if (user.freeUsage.count >= 5) {
+  // UPDATED: Limit increased to 10
+  if (user.freeUsage.count >= 10) {
     return { allowed: false, error: "Daily limit reached" };
   }
 
   user.freeUsage.count += 1;
   await user.save();
-  
-  return { allowed: true, tier: 'free', remaining: 5 - user.freeUsage.count };
+   
+  return { allowed: true, tier: 'free', remaining: 10 - user.freeUsage.count };
 }
 
 // ================= ROUTES =================
 
-// 1. AUTH
+// 1. AUTH (FIXED TOKEN EXTRACTION)
 app.post("/api/auth/google", async (req, res) => {
   try {
-    const { token } = req.body;
-    const googleRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${token}`);
-    if (!googleRes.ok) return res.status(401).json({ error: "Invalid Google Token" });
+    // FIX: Electron sends { user: {...}, tokens: { id_token: ... } }
+    // We check for direct 'token' OR nested 'tokens.id_token'
+    const { token, tokens } = req.body;
+    const idToken = token || (tokens && tokens.id_token);
+
+    if (!idToken) {
+        return res.status(400).json({ error: "Missing ID Token in payload" });
+    }
+
+    const googleRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${idToken}`);
+    if (!googleRes.ok) {
+        const errText = await googleRes.text();
+        console.error("Google Token Validation Failed:", errText);
+        return res.status(401).json({ error: "Invalid Google Token" });
+    }
 
     const payload = await googleRes.json();
     const { sub: googleId, email, name, picture: avatarUrl } = payload;
@@ -152,6 +156,7 @@ app.post("/api/auth/google", async (req, res) => {
     );
     res.json({ success: true, user });
   } catch (err) {
+    console.error("Auth Error:", err);
     res.status(500).json({ error: "Database error" });
   }
 });
@@ -255,14 +260,10 @@ app.post("/api/payment/verify", async (req, res) => {
   }
 });
 
-// ==========================================
-//  AI & TRANSCRIPTION APIs
-// ==========================================
-
-// 5. STREAM CHAT (With 400 Error Fix)
+// 5. STREAM CHAT
 app.post("/api/chat-stream", async (req, res) => {
   const googleId = req.headers["x-google-id"];
-  
+   
   if (googleId) {
     const check = await checkAndIncrementUsage(googleId);
     if (!check.allowed) return res.status(403).json({ error: "Daily limit reached. Please upgrade to Pro." });
@@ -277,9 +278,7 @@ app.post("/api/chat-stream", async (req, res) => {
     return res.status(400).json({ error: "Invalid Body" });
   }
 
-  // *** FIX: Ensure Data URI for OpenAI ***
   if (screenshot && !screenshot.startsWith("data:image")) {
-      // Append the prefix if missing (assuming PNG as standard for screenshots)
       screenshot = `data:image/png;base64,${screenshot}`;
   }
 
@@ -289,10 +288,9 @@ app.post("/api/chat-stream", async (req, res) => {
   let newMessage;
   if (screenshot) {
     const parts = [];
-    // Always provide a text prompt for context if user didn't type one
     if (content) parts.push({ type: "text", text: content });
     else parts.push({ type: "text", text: "Analyze this screenshot contextually." });
-    
+     
     parts.push({ type: "image_url", image_url: { url: screenshot } });
     newMessage = { role, content: parts };
   } else {
@@ -323,7 +321,6 @@ app.post("/api/chat-stream", async (req, res) => {
 
     if (!openaiRes.ok) {
       const errText = await openaiRes.text();
-      console.error("OpenAI stream error:", openaiRes.status, errText);
       res.statusCode = 500;
       res.end(`OpenAI Error: ${openaiRes.status} - ${errText}`);
       return;
@@ -334,7 +331,6 @@ app.post("/api/chat-stream", async (req, res) => {
     }
     res.end();
   } catch (err) {
-    console.error("Stream Error:", err);
     res.statusCode = 500;
     res.end("Internal Stream Error");
   }
@@ -358,13 +354,12 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
         headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
         body: formData
     });
-    
+     
     const data = await openaiRes.json();
     if (!openaiRes.ok) throw new Error(data.error?.message || "OpenAI Error");
 
     res.json({ text: data.text || "" });
   } catch (err) {
-    console.error("Transcribe Error:", err);
     res.status(500).json({ error: "Transcription failed" });
   }
 });
