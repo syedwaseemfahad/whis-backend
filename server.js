@@ -73,12 +73,11 @@ const userSchema = new mongoose.Schema({
 
 const User = mongoose.model("User", userSchema);
 
-// Helper: Tier Value for comparison
+// Tier Hierarchy for Upgrade/Downgrade checks
 const TIER_LEVELS = { "free": 0, "pro": 1, "pro_plus": 2 };
 
 // --------- Middleware ---------
 app.use((req, res, next) => {
-  // Allow these routes without custom checks (Auth is handled inside them)
   if (
     req.path.startsWith("/api/auth") ||
     req.path.startsWith("/api/user") ||
@@ -274,11 +273,7 @@ app.post("/api/payment/verify", async (req, res) => {
   }
 });
 
-// ==========================================
-//  AI & TRANSCRIPTION APIs
-// ==========================================
-
-// 5. STREAM CHAT (With 400 Error Fix & Full Stream Logic)
+// 5. STREAM CHAT
 app.post("/api/chat-stream", async (req, res) => {
   const googleId = req.headers["x-google-id"];
   
@@ -296,9 +291,7 @@ app.post("/api/chat-stream", async (req, res) => {
     return res.status(400).json({ error: "Invalid Body" });
   }
 
-  // *** FIX: Ensure Data URI for OpenAI ***
   if (screenshot && !screenshot.startsWith("data:image")) {
-      // Append the prefix if missing (assuming PNG as standard for screenshots)
       screenshot = `data:image/png;base64,${screenshot}`;
   }
 
@@ -308,10 +301,8 @@ app.post("/api/chat-stream", async (req, res) => {
   let newMessage;
   if (screenshot) {
     const parts = [];
-    // Always provide a text prompt for context if user didn't type one
     if (content) parts.push({ type: "text", text: content });
     else parts.push({ type: "text", text: "Analyze this screenshot contextually." });
-    
     parts.push({ type: "image_url", image_url: { url: screenshot } });
     newMessage = { role, content: parts };
   } else {
@@ -342,7 +333,6 @@ app.post("/api/chat-stream", async (req, res) => {
 
     if (!openaiRes.ok) {
       const errText = await openaiRes.text();
-      console.error("OpenAI stream error:", openaiRes.status, errText);
       res.statusCode = 500;
       res.end(`OpenAI Error: ${openaiRes.status} - ${errText}`);
       return;
@@ -383,7 +373,6 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
 
     res.json({ text: data.text || "" });
   } catch (err) {
-    console.error("Transcribe Error:", err);
     res.status(500).json({ error: "Transcription failed" });
   }
 });
