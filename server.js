@@ -119,11 +119,9 @@ async function checkAndIncrementUsage(googleId) {
 
 // ================= ROUTES =================
 
-// 1. AUTH (FIXED TOKEN EXTRACTION)
+// 1. AUTH
 app.post("/api/auth/google", async (req, res) => {
   try {
-    // FIX: Electron sends { user: {...}, tokens: { id_token: ... } }
-    // We check for direct 'token' OR nested 'tokens.id_token'
     const { token, tokens } = req.body;
     const idToken = token || (tokens && tokens.id_token);
 
@@ -133,8 +131,6 @@ app.post("/api/auth/google", async (req, res) => {
 
     const googleRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${idToken}`);
     if (!googleRes.ok) {
-        const errText = await googleRes.text();
-        console.error("Google Token Validation Failed:", errText);
         return res.status(401).json({ error: "Invalid Google Token" });
     }
 
@@ -161,7 +157,7 @@ app.post("/api/auth/google", async (req, res) => {
   }
 });
 
-// 2. USER STATUS
+// 2. USER STATUS (FIXED: NOW RESETS DAILY COUNT)
 app.get("/api/user/status", async (req, res) => {
   try {
     const googleId = req.headers["x-google-id"];
@@ -170,13 +166,33 @@ app.get("/api/user/status", async (req, res) => {
     const user = await User.findOne({ googleId });
     if (!user) return res.json({ active: false, tier: null });
 
+    // 1. Check Subscription Expiry
     const isActive = user.subscription.status === "active";
     if (isActive && user.subscription.validUntil && new Date() > user.subscription.validUntil) {
       user.subscription.status = "inactive";
       user.subscription.tier = "free";
       await user.save();
-      return res.json({ active: false, tier: "free", expired: true, freeUsage: user.freeUsage, orders: user.orders });
+      // Proceed to check free usage below
     }
+
+    // 2. NEW: Check Free Usage Daily Reset
+    const today = new Date().toISOString().slice(0, 10);
+    let dirty = false;
+    
+    // Initialize if missing
+    if (!user.freeUsage) {
+        user.freeUsage = { count: 0, lastDate: today };
+        dirty = true;
+    }
+    
+    // Reset if new day
+    if (user.freeUsage.lastDate !== today) {
+        user.freeUsage.count = 0;
+        user.freeUsage.lastDate = today;
+        dirty = true;
+    }
+
+    if (dirty) await user.save();
 
     res.json({
       active: user.subscription.status === "active",
@@ -186,6 +202,7 @@ app.get("/api/user/status", async (req, res) => {
       orders: user.orders ? user.orders.sort((a,b) => new Date(b.date) - new Date(a.date)) : []
     });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "Failed to check status" });
   }
 });
