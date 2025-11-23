@@ -73,6 +73,9 @@ const userSchema = new mongoose.Schema({
 
 const User = mongoose.model("User", userSchema);
 
+// Helper: Tier Value for comparison
+const TIER_LEVELS = { "free": 0, "pro": 1, "pro_plus": 2 };
+
 // --------- Middleware ---------
 app.use((req, res, next) => {
   // Allow these routes without custom checks (Auth is handled inside them)
@@ -115,14 +118,15 @@ async function checkAndIncrementUsage(googleId) {
     user.freeUsage.lastDate = today;
   }
 
-  if (user.freeUsage.count >= 5) {
+  // UPDATED LIMIT: 10 per day
+  if (user.freeUsage.count >= 10) {
     return { allowed: false, error: "Daily limit reached" };
   }
 
   user.freeUsage.count += 1;
   await user.save();
   
-  return { allowed: true, tier: 'free', remaining: 5 - user.freeUsage.count };
+  return { allowed: true, tier: 'free', remaining: 10 - user.freeUsage.count };
 }
 
 // ================= ROUTES =================
@@ -139,7 +143,7 @@ app.post("/api/auth/google", async (req, res) => {
 
     const user = await User.findOneAndUpdate(
       { googleId },
-      {
+      { 
         email, name, avatarUrl, lastLogin: new Date(),
         $setOnInsert: {
           "subscription.status": "inactive",
@@ -185,16 +189,31 @@ app.get("/api/user/status", async (req, res) => {
   }
 });
 
-// 3. CREATE PAYMENT
+// 3. CREATE PAYMENT (Updated Pricing & Protection)
 app.post("/api/payment/create-order", async (req, res) => {
   try {
     const { googleId, tier, cycle } = req.body; 
     const user = await User.findOne({ googleId });
     if (!user) return res.status(404).json({ error: "User not found" });
 
+    // 1. Prevent Downgrade or Same-Tier Purchase
+    const currentTier = (user.subscription.status === 'active') ? user.subscription.tier : "free";
+    const currentLevel = TIER_LEVELS[currentTier];
+    const requestedLevel = TIER_LEVELS[tier];
+
+    if (user.subscription.status === 'active' && requestedLevel <= currentLevel) {
+        return res.status(400).json({ error: `You are already on the ${currentTier.replace('_', ' ')} plan. You cannot purchase the same or lower tier.` });
+    }
+
+    // 2. Pricing Logic
     let amount = 1.0;
-    if (tier === "pro") amount = (cycle === "annual") ? 4788.0 : 799.0;
-    else if (tier === "pro_plus") amount = (cycle === "annual") ? 11988.0 : 1999.0;
+    if (tier === "pro") {
+        // Pro Monthly: 799, Annual: 499 * 12 = 5988
+        amount = (cycle === "annual") ? 5988.0 : 799.0;
+    } else if (tier === "pro_plus") {
+        // Stealth Monthly: 2499, Annual: 999 * 12 = 11988
+        amount = (cycle === "annual") ? 11988.0 : 2499.0;
+    }
 
     const orderId = `order_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
 
@@ -259,7 +278,7 @@ app.post("/api/payment/verify", async (req, res) => {
 //  AI & TRANSCRIPTION APIs
 // ==========================================
 
-// 5. STREAM CHAT (With 400 Error Fix)
+// 5. STREAM CHAT (With 400 Error Fix & Full Stream Logic)
 app.post("/api/chat-stream", async (req, res) => {
   const googleId = req.headers["x-google-id"];
   
