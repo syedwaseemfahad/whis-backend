@@ -13,7 +13,6 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/whis-app";
 
 // The URL where your frontend is hosted (for payment redirects)
-// Change this to your actual production frontend URL
 const UI_API = process.env.UI_API || "http://localhost:5500"; 
 
 // Cashfree Config
@@ -33,8 +32,8 @@ const upload = multer({ storage: multer.memoryStorage() });
 const app = express();
 
 app.use(cors());
-// Allow larger JSON payloads (for screenshots as base64 URLs)
-app.use(express.json({ limit: "10mb" }));
+// Increased limit to 50mb to handle high-res screenshots without crashing
+app.use(express.json({ limit: "50mb" }));
 
 // --- 1. MongoDB Connection ---
 mongoose
@@ -54,7 +53,6 @@ const userSchema = new mongoose.Schema({
     cycle: { type: String, enum: ["monthly", "annual"], default: "monthly" },
     validUntil: Date
   },
-  // Track free usage server-side
   freeUsage: {
     count: { type: Number, default: 0 },
     lastDate: { type: String } // Format: YYYY-MM-DD
@@ -77,7 +75,7 @@ const User = mongoose.model("User", userSchema);
 
 // --------- Middleware ---------
 app.use((req, res, next) => {
-  // Auth-free routes
+  // Allow these routes without custom checks (Auth is handled inside them)
   if (
     req.path.startsWith("/api/auth") ||
     req.path.startsWith("/api/user") ||
@@ -89,62 +87,52 @@ app.use((req, res, next) => {
   next();
 });
 
-// In-memory conversation history store
 const conversations = new Map();
 
-// --- Helper: Check & Increment Free Usage ---
+// --- Helper: Usage Check ---
 async function checkAndIncrementUsage(googleId) {
-  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  const today = new Date().toISOString().slice(0, 10);
   const user = await User.findOne({ googleId });
   
   if (!user) return { allowed: false, error: "User not found" };
 
-  // 1. If paid and active, allow unlimited
+  // Check Paid Status
   if (user.subscription.status === 'active' && ['pro', 'pro_plus'].includes(user.subscription.tier)) {
-     // Check expiry
      if (user.subscription.validUntil && new Date() > user.subscription.validUntil) {
-         // Expired - fall through to free logic
+         // Expired
          user.subscription.status = 'inactive';
          user.subscription.tier = 'free';
          await user.save();
      } else {
+         // Active
          return { allowed: true, tier: user.subscription.tier };
      }
   }
 
-  // 2. Free tier logic
-  // Reset if new day
+  // Free Tier Logic
   if (user.freeUsage.lastDate !== today) {
     user.freeUsage.count = 0;
     user.freeUsage.lastDate = today;
   }
 
-  // Check limit (5 per day)
   if (user.freeUsage.count >= 5) {
     return { allowed: false, error: "Daily limit reached" };
   }
 
-  // Increment
   user.freeUsage.count += 1;
   await user.save();
   
   return { allowed: true, tier: 'free', remaining: 5 - user.freeUsage.count };
 }
 
-// ==========================================
-//  AUTH & USER APIs
-// ==========================================
+// ================= ROUTES =================
 
+// 1. AUTH
 app.post("/api/auth/google", async (req, res) => {
   try {
     const { token } = req.body;
-    if (!token) return res.status(400).json({ error: "Missing google token" });
-
-    const googleRes = await fetch(
-      `https://oauth2.googleapis.com/tokeninfo?id_token=${token}`
-    );
-    if (!googleRes.ok)
-      return res.status(401).json({ error: "Invalid Google Token" });
+    const googleRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${token}`);
+    if (!googleRes.ok) return res.status(401).json({ error: "Invalid Google Token" });
 
     const payload = await googleRes.json();
     const { sub: googleId, email, name, picture: avatarUrl } = payload;
@@ -152,10 +140,7 @@ app.post("/api/auth/google", async (req, res) => {
     const user = await User.findOneAndUpdate(
       { googleId },
       {
-        email,
-        name,
-        avatarUrl,
-        lastLogin: new Date(),
+        email, name, avatarUrl, lastLogin: new Date(),
         $setOnInsert: {
           "subscription.status": "inactive",
           "subscription.tier": "free",
@@ -165,15 +150,13 @@ app.post("/api/auth/google", async (req, res) => {
       },
       { new: true, upsert: true }
     );
-
     res.json({ success: true, user });
   } catch (err) {
-    console.error("Auth Error:", err);
     res.status(500).json({ error: "Database error" });
   }
 });
 
-// *** UPDATED to support Profile UI ***
+// 2. USER STATUS
 app.get("/api/user/status", async (req, res) => {
   try {
     const googleId = req.headers["x-google-id"];
@@ -183,25 +166,13 @@ app.get("/api/user/status", async (req, res) => {
     if (!user) return res.json({ active: false, tier: null });
 
     const isActive = user.subscription.status === "active";
-
-    if (
-      isActive &&
-      user.subscription.validUntil &&
-      new Date() > user.subscription.validUntil
-    ) {
+    if (isActive && user.subscription.validUntil && new Date() > user.subscription.validUntil) {
       user.subscription.status = "inactive";
-      user.subscription.tier = "free"; // Reset to free on expiry
+      user.subscription.tier = "free";
       await user.save();
-      return res.json({
-        active: false,
-        tier: "free",
-        expired: true,
-        freeUsage: user.freeUsage,
-        orders: user.orders
-      });
+      return res.json({ active: false, tier: "free", expired: true, freeUsage: user.freeUsage, orders: user.orders });
     }
 
-    // Return rich data for the new UI
     res.json({
       active: user.subscription.status === "active",
       tier: user.subscription.tier,
@@ -210,51 +181,22 @@ app.get("/api/user/status", async (req, res) => {
       orders: user.orders ? user.orders.sort((a,b) => new Date(b.date) - new Date(a.date)) : []
     });
   } catch (err) {
-    console.error("Status Check Error:", err);
     res.status(500).json({ error: "Failed to check status" });
   }
 });
 
-// ==========================================
-//  CASHFREE PAYMENTS
-// ==========================================
-
-// *** UPDATED to support Pro vs Pro+ Pricing ***
+// 3. CREATE PAYMENT
 app.post("/api/payment/create-order", async (req, res) => {
   try {
     const { googleId, tier, cycle } = req.body; 
-
     const user = await User.findOne({ googleId });
     if (!user) return res.status(404).json({ error: "User not found" });
 
-    // --- PRICE CALCULATION ---
     let amount = 1.0;
-
-    if (tier === "pro") {
-      // Pro: ₹799/mo or ₹4788/yr (approx ₹399/mo)
-      if (cycle === "annual") amount = 4788.0; 
-      else amount = 799.0;
-    } else if (tier === "pro_plus") {
-      // Pro+: ₹1999/mo or ₹11988/yr (approx ₹999/mo)
-      if (cycle === "annual") amount = 11988.0; 
-      else amount = 1999.0;
-    }
+    if (tier === "pro") amount = (cycle === "annual") ? 4788.0 : 799.0;
+    else if (tier === "pro_plus") amount = (cycle === "annual") ? 11988.0 : 1999.0;
 
     const orderId = `order_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
-
-    const payload = {
-      order_id: orderId,
-      order_amount: amount,
-      order_currency: "INR",
-      customer_details: {
-        customer_id: googleId,
-        customer_email: user.email,
-        customer_phone: "9999999999" // Sandbox Requirement
-      },
-      order_meta: {
-        return_url: `${UI_API}/payment.html?order_id=${orderId}`
-      }
-    };
 
     const response = await fetch(`${CASHFREE_URL}/orders`, {
       method: "POST",
@@ -264,83 +206,51 @@ app.post("/api/payment/create-order", async (req, res) => {
         "x-client-id": CASHFREE_APP_ID,
         "x-client-secret": CASHFREE_SECRET_KEY
       },
-      body: JSON.stringify(payload)
+      body: JSON.stringify({
+        order_id: orderId,
+        order_amount: amount,
+        order_currency: "INR",
+        customer_details: { customer_id: googleId, customer_email: user.email, customer_phone: "9999999999" },
+        order_meta: { return_url: `${UI_API}/payment.html?order_id=${orderId}` }
+      })
     });
 
     const data = await response.json();
+    if (!response.ok) return res.status(500).json({ error: data.message });
 
-    if (!response.ok) {
-      console.error("Cashfree Failed:", data);
-      return res
-        .status(500)
-        .json({ error: data.message || "Payment creation failed" });
-    }
-
-    // Save pending order
-    user.orders.push({
-      orderId,
-      amount,
-      date: new Date(),
-      status: "PENDING",
-      tier: tier, 
-      cycle: cycle 
-    });
+    user.orders.push({ orderId, amount, date: new Date(), status: "PENDING", tier, cycle });
     await user.save();
 
-    res.json({
-      payment_session_id: data.payment_session_id,
-      order_id: orderId
-    });
+    res.json({ payment_session_id: data.payment_session_id, order_id: orderId });
   } catch (err) {
-    console.error("Create Order Error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
+// 4. VERIFY PAYMENT
 app.post("/api/payment/verify", async (req, res) => {
   try {
     const { orderId } = req.body;
-
     const response = await fetch(`${CASHFREE_URL}/orders/${orderId}`, {
-      headers: {
-        "x-api-version": "2023-08-01",
-        "x-client-id": CASHFREE_APP_ID,
-        "x-client-secret": CASHFREE_SECRET_KEY
-      }
+      headers: { "x-api-version": "2023-08-01", "x-client-id": CASHFREE_APP_ID, "x-client-secret": CASHFREE_SECRET_KEY }
     });
-
     const data = await response.json();
 
     if (data.order_status === "PAID") {
       const user = await User.findOne({ "orders.orderId": orderId });
-
       if (user) {
         const order = user.orders.find((o) => o.orderId === orderId);
-
         user.subscription.status = "active";
-
-        if (order && order.tier) {
-          user.subscription.tier = order.tier;
-          const days = order.cycle === "annual" ? 365 : 30;
-          user.subscription.validUntil = new Date(
-            Date.now() + days * 24 * 60 * 60 * 1000
-          );
-        } else {
-          // Fallback if tier/cycle not saved
-          user.subscription.tier = "pro";
-          user.subscription.validUntil = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-        }
-
+        user.subscription.tier = order?.tier || "pro";
+        const days = order?.cycle === "annual" ? 365 : 30;
+        user.subscription.validUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
         if (order) order.status = "PAID";
-
         await user.save();
         return res.json({ status: "PAID", success: true });
       }
     }
-
     res.json({ status: data.order_status, success: false });
   } catch (err) {
-    console.error("Verify Error:", err);
     res.status(500).json({ error: "Verification failed" });
   }
 });
@@ -349,25 +259,28 @@ app.post("/api/payment/verify", async (req, res) => {
 //  AI & TRANSCRIPTION APIs
 // ==========================================
 
-// ---------- STREAM CHAT (Enforces Limit & Uses Memory) ----------
+// 5. STREAM CHAT (With 400 Error Fix)
 app.post("/api/chat-stream", async (req, res) => {
   const googleId = req.headers["x-google-id"];
   
-  // 1. Check Usage Limit
   if (googleId) {
     const check = await checkAndIncrementUsage(googleId);
-    if (!check.allowed) {
-      return res.status(403).json({ error: "Daily limit reached. Please upgrade to Pro." });
-    }
+    if (!check.allowed) return res.status(403).json({ error: "Daily limit reached. Please upgrade to Pro." });
   }
 
   const { conversationId, message } = req.body || {};
   const role = message?.role;
   const content = message?.content;
-  const screenshot = message?.screenshot;
+  let screenshot = message?.screenshot;
 
   if (!role || (!content && !screenshot)) {
     return res.status(400).json({ error: "Invalid Body" });
+  }
+
+  // *** FIX: Ensure Data URI for OpenAI ***
+  if (screenshot && !screenshot.startsWith("data:image")) {
+      // Append the prefix if missing (assuming PNG as standard for screenshots)
+      screenshot = `data:image/png;base64,${screenshot}`;
   }
 
   let convId = conversationId || `conv_${Date.now()}`;
@@ -376,13 +289,11 @@ app.post("/api/chat-stream", async (req, res) => {
   let newMessage;
   if (screenshot) {
     const parts = [];
-    if (content) {
-      parts.push({ type: "text", text: content });
-    }
-    parts.push({
-      type: "image_url",
-      image_url: { url: screenshot }
-    });
+    // Always provide a text prompt for context if user didn't type one
+    if (content) parts.push({ type: "text", text: content });
+    else parts.push({ type: "text", text: "Analyze this screenshot contextually." });
+    
+    parts.push({ type: "image_url", image_url: { url: screenshot } });
     newMessage = { role, content: parts };
   } else {
     newMessage = { role, content };
@@ -396,34 +307,25 @@ app.post("/api/chat-stream", async (req, res) => {
   res.setHeader("Transfer-Encoding", "chunked");
 
   try {
-    const openaiRes = await fetch(
-      "https://api.openai.com/v1/chat/completions",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          model: "gpt-4o-mini",
-          messages: history,
-          temperature: 0.6,
-          stream: true
-        })
-      }
-    );
+    const openaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: history,
+        temperature: 0.6,
+        stream: true
+      })
+    });
 
     if (!openaiRes.ok) {
       const errText = await openaiRes.text();
       console.error("OpenAI stream error:", openaiRes.status, errText);
       res.statusCode = 500;
-      res.end(`OpenAI Error: ${openaiRes.status}`);
-      return;
-    }
-
-    if (!openaiRes.body) {
-      res.statusCode = 500;
-      res.end("No body from OpenAI");
+      res.end(`OpenAI Error: ${openaiRes.status} - ${errText}`);
       return;
     }
 
@@ -438,27 +340,19 @@ app.post("/api/chat-stream", async (req, res) => {
   }
 });
 
-// ---------- TRANSCRIBE ----------
+// 6. TRANSCRIPTION
 app.post("/api/transcribe", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "Missing file" });
 
-    // Note: 'req.file.buffer' is available because we used multer.memoryStorage()
     const mime = req.file.mimetype || "audio/webm";
     const filename = req.file.originalname || "audio.webm";
 
     const formData = new FormData();
-    formData.append(
-      "file",
-      new Blob([req.file.buffer], { type: mime }),
-      filename
-    );
-
-    // Use gpt-4o-transcribe or whisper-1
+    formData.append("file", new Blob([req.file.buffer], { type: mime }), filename);
     formData.append("model", "whisper-1"); 
     formData.append("language", "en");
 
-    // Note: Using fetch to OpenAI here
     const openaiRes = await fetch("https://api.openai.com/v1/audio/transcriptions", {
         method: "POST",
         headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
