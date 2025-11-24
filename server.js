@@ -217,7 +217,7 @@ app.get("/api/user/status", async (req, res) => {
   }
 });
 
-// 3. CREATE RAZORPAY ORDER (UPDATED FOR ₹1 TESTING)
+// 3. CREATE RAZORPAY ORDER
 app.post("/api/payment/create-order", async (req, res) => {
   try {
     const { googleId, tier, cycle } = req.body; 
@@ -225,12 +225,17 @@ app.post("/api/payment/create-order", async (req, res) => {
     if (!user) return res.status(404).json({ error: "User not found" });
 
     // --- PRICING LOGIC ---
-    // FOR TESTING: FORCE PRICE TO ₹1
-    let amount = 1.0; 
+    let amount = 0;
     
-    // OLD LOGIC (Commented out for future reference)
-    // if (tier === "pro") amount = (cycle === "annual") ? 4788.0 : 799.0;
-    // else if (tier === "pro_plus") amount = (cycle === "annual") ? 11988.0 : 1999.0;
+    if (tier === "pro") {
+        // Pro: 999/mo OR 499/mo (billed yearly = 5988)
+        amount = (cycle === "annual") ? 5988.0 : 999.0;
+    } else if (tier === "pro_plus") { // Stealth
+        // Stealth: 2499/mo OR 999/mo (billed yearly = 11988)
+        amount = (cycle === "annual") ? 11988.0 : 2499.0;
+    } else {
+        return res.status(400).json({ error: "Invalid tier" });
+    }
 
     const amountInPaise = Math.round(amount * 100);
     const receiptId = `rcpt_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
