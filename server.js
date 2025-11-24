@@ -4,6 +4,8 @@ const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
 const mongoose = require("mongoose");
+const Razorpay = require("razorpay");
+const crypto = require("crypto");
 
 // --- CONFIGURATION ---
 const PORT = process.env.PORT || 4000;
@@ -11,17 +13,21 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/whis-app";
 const UI_API = process.env.UI_API || "http://localhost:5500"; 
 
-// Cashfree Config
-const CASHFREE_APP_ID = process.env.CASHFREE_APP_ID;
-const CASHFREE_SECRET_KEY = process.env.CASHFREE_SECRET_KEY;
-const CASHFREE_ENV = process.env.CASHFREE_ENV || "SANDBOX";
-const CASHFREE_URL = CASHFREE_ENV === "PRODUCTION"
-    ? "https://api.cashfree.com/pg"
-    : "https://sandbox.cashfree.com/pg";
+// Razorpay Config
+const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
+const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
 
 if (!OPENAI_API_KEY) {
   console.error("⚠️ OPENAI_API_KEY missing in backend/.env");
 }
+if (!RAZORPAY_KEY_ID || !RAZORPAY_KEY_SECRET) {
+  console.error("⚠️ RAZORPAY_KEY_ID or RAZORPAY_KEY_SECRET missing in backend/.env");
+}
+
+const razorpay = new Razorpay({
+  key_id: RAZORPAY_KEY_ID,
+  key_secret: RAZORPAY_KEY_SECRET,
+});
 
 const upload = multer({ storage: multer.memoryStorage() });
 const app = express();
@@ -35,12 +41,13 @@ mongoose
   .then(() => console.log("✅ Connected to MongoDB"))
   .catch((err) => console.error("❌ MongoDB connection error:", err));
 
-// --- 2. User Schema ---
+// --- 2. User Schema (Expanded for detailed tracking) ---
 const userSchema = new mongoose.Schema({
   googleId: { type: String, unique: true, required: true },
   email: { type: String, required: true },
   name: String,
   avatarUrl: String,
+  phone: String, // Added to track user phone if provided
   subscription: {
     status: { type: String, enum: ["active", "inactive", "past_due"], default: "inactive" },
     tier: { type: String, enum: ["free", "pro", "pro_plus"], default: "free" },
@@ -53,12 +60,18 @@ const userSchema = new mongoose.Schema({
   },
   orders: [
     {
-      orderId: String,
+      orderId: String,          // Razorpay Order ID
+      paymentId: String,        // Razorpay Payment ID
+      signature: String,        // Razorpay Signature
       amount: Number,
+      currency: String,
       date: Date,
-      status: String,
+      status: String,           // created, paid, failed
       tier: String, 
-      cycle: String 
+      cycle: String,
+      method: String,           // card, upi, netbanking, etc.
+      receipt: String,
+      notes: Object             // Extra metadata
     }
   ],
   createdAt: { type: Date, default: Date.now },
@@ -82,7 +95,7 @@ app.use((req, res, next) => {
 
 const conversations = new Map();
 
-// --- Helper: Usage Check (UPDATED LIMIT TO 10) ---
+// --- Helper: Usage Check ---
 async function checkAndIncrementUsage(googleId) {
   const today = new Date().toISOString().slice(0, 10);
   const user = await User.findOne({ googleId });
@@ -106,7 +119,7 @@ async function checkAndIncrementUsage(googleId) {
     user.freeUsage.lastDate = today;
   }
 
-  // UPDATED: Limit increased to 10
+  // Limit: 10
   if (user.freeUsage.count >= 10) {
     return { allowed: false, error: "Daily limit reached" };
   }
@@ -157,7 +170,7 @@ app.post("/api/auth/google", async (req, res) => {
   }
 });
 
-// 2. USER STATUS (FIXED: NOW RESETS DAILY COUNT)
+// 2. USER STATUS
 app.get("/api/user/status", async (req, res) => {
   try {
     const googleId = req.headers["x-google-id"];
@@ -172,20 +185,17 @@ app.get("/api/user/status", async (req, res) => {
       user.subscription.status = "inactive";
       user.subscription.tier = "free";
       await user.save();
-      // Proceed to check free usage below
     }
 
-    // 2. NEW: Check Free Usage Daily Reset
+    // 2. Check Free Usage Daily Reset
     const today = new Date().toISOString().slice(0, 10);
     let dirty = false;
     
-    // Initialize if missing
     if (!user.freeUsage) {
         user.freeUsage = { count: 0, lastDate: today };
         dirty = true;
     }
     
-    // Reset if new day
     if (user.freeUsage.lastDate !== today) {
         user.freeUsage.count = 0;
         user.freeUsage.lastDate = today;
@@ -207,7 +217,7 @@ app.get("/api/user/status", async (req, res) => {
   }
 });
 
-// 3. CREATE PAYMENT
+// 3. CREATE RAZORPAY ORDER
 app.post("/api/payment/create-order", async (req, res) => {
   try {
     const { googleId, tier, cycle } = req.body; 
@@ -215,64 +225,109 @@ app.post("/api/payment/create-order", async (req, res) => {
     if (!user) return res.status(404).json({ error: "User not found" });
 
     let amount = 1.0;
+    // Amounts in PAISE (Razorpay uses smallest currency unit)
     if (tier === "pro") amount = (cycle === "annual") ? 4788.0 : 799.0;
     else if (tier === "pro_plus") amount = (cycle === "annual") ? 11988.0 : 1999.0;
 
-    const orderId = `order_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+    const amountInPaise = Math.round(amount * 100);
+    const receiptId = `rcpt_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
 
-    const response = await fetch(`${CASHFREE_URL}/orders`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-version": "2023-08-01",
-        "x-client-id": CASHFREE_APP_ID,
-        "x-client-secret": CASHFREE_SECRET_KEY
-      },
-      body: JSON.stringify({
-        order_id: orderId,
-        order_amount: amount,
-        order_currency: "INR",
-        customer_details: { customer_id: googleId, customer_email: user.email, customer_phone: "9999999999" },
-        order_meta: { return_url: `${UI_API}/payment.html?order_id=${orderId}` }
-      })
+    const options = {
+      amount: amountInPaise,
+      currency: "INR",
+      receipt: receiptId,
+      notes: {
+        userId: googleId,
+        tier: tier,
+        cycle: cycle,
+        userEmail: user.email
+      }
+    };
+
+    const order = await razorpay.orders.create(options);
+
+    if (!order) return res.status(500).json({ error: "Razorpay order creation failed" });
+
+    // Store initial order attempt
+    user.orders.push({ 
+      orderId: order.id, 
+      amount: amount, 
+      date: new Date(), 
+      status: "created", 
+      tier, 
+      cycle,
+      receipt: receiptId,
+      currency: "INR"
     });
-
-    const data = await response.json();
-    if (!response.ok) return res.status(500).json({ error: data.message });
-
-    user.orders.push({ orderId, amount, date: new Date(), status: "PENDING", tier, cycle });
     await user.save();
 
-    res.json({ payment_session_id: data.payment_session_id, order_id: orderId });
+    res.json({ 
+      order_id: order.id, 
+      amount: amountInPaise,
+      currency: "INR",
+      key_id: RAZORPAY_KEY_ID, // Send key_id to frontend
+      user_name: user.name,
+      user_email: user.email,
+      user_contact: user.phone || "" 
+    });
   } catch (err) {
+    console.error("Create Order Error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
-// 4. VERIFY PAYMENT
+// 4. VERIFY RAZORPAY PAYMENT
 app.post("/api/payment/verify", async (req, res) => {
   try {
-    const { orderId } = req.body;
-    const response = await fetch(`${CASHFREE_URL}/orders/${orderId}`, {
-      headers: { "x-api-version": "2023-08-01", "x-client-id": CASHFREE_APP_ID, "x-client-secret": CASHFREE_SECRET_KEY }
-    });
-    const data = await response.json();
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
 
-    if (data.order_status === "PAID") {
-      const user = await User.findOne({ "orders.orderId": orderId });
-      if (user) {
-        const order = user.orders.find((o) => o.orderId === orderId);
-        user.subscription.status = "active";
-        user.subscription.tier = order?.tier || "pro";
-        const days = order?.cycle === "annual" ? 365 : 30;
-        user.subscription.validUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
-        if (order) order.status = "PAID";
-        await user.save();
-        return res.json({ status: "PAID", success: true });
+    const body = razorpay_order_id + "|" + razorpay_payment_id;
+    const expectedSignature = crypto
+      .createHmac("sha256", RAZORPAY_KEY_SECRET)
+      .update(body.toString())
+      .digest("hex");
+
+    const isAuthentic = expectedSignature === razorpay_signature;
+
+    if (isAuthentic) {
+      const user = await User.findOne({ "orders.orderId": razorpay_order_id });
+      if (!user) return res.status(404).json({ error: "Order not found attached to user" });
+
+      const order = user.orders.find((o) => o.orderId === razorpay_order_id);
+      
+      // Fetch Detailed Payment Info from Razorpay to store method (UPI/Card etc)
+      let paymentMethod = "unknown";
+      try {
+        const paymentDetails = await razorpay.payments.fetch(razorpay_payment_id);
+        paymentMethod = paymentDetails.method;
+        if(paymentDetails.contact && !user.phone) {
+            user.phone = paymentDetails.contact; // Save phone if we didn't have it
+        }
+      } catch (e) {
+        console.error("Could not fetch extended payment details", e);
       }
+
+      // Update User Subscription
+      user.subscription.status = "active";
+      user.subscription.tier = order?.tier || "pro";
+      const days = order?.cycle === "annual" ? 365 : 30;
+      user.subscription.validUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+
+      // Update Order Details
+      if (order) {
+        order.status = "paid";
+        order.paymentId = razorpay_payment_id;
+        order.signature = razorpay_signature;
+        order.method = paymentMethod;
+      }
+      
+      await user.save();
+      return res.json({ status: "success", success: true });
+    } else {
+      return res.status(400).json({ status: "failure", success: false, error: "Invalid Signature" });
     }
-    res.json({ status: data.order_status, success: false });
   } catch (err) {
+    console.error("Verification Error:", err);
     res.status(500).json({ error: "Verification failed" });
   }
 });
