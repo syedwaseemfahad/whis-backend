@@ -6,6 +6,7 @@ const multer = require("multer");
 const mongoose = require("mongoose");
 const Razorpay = require("razorpay");
 const crypto = require("crypto");
+const path = require("path"); // Added path module
 
 // --- CONFIGURATION ---
 const PORT = process.env.PORT || 4000;
@@ -34,6 +35,9 @@ const app = express();
 
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
+
+// Serve static assets (CSS, JS, Images) normally
+app.use(express.static(__dirname));
 
 // --- 1. MongoDB Connection ---
 mongoose
@@ -228,10 +232,8 @@ app.post("/api/payment/create-order", async (req, res) => {
     let amount = 0;
     
     if (tier === "pro") {
-        // Pro: 999/mo OR 499/mo (billed yearly = 5988)
         amount = (cycle === "annual") ? 5988.0 : 999.0;
     } else if (tier === "pro_plus") { // Stealth
-        // Stealth: 2499/mo OR 999/mo (billed yearly = 11988)
         amount = (cycle === "annual") ? 11988.0 : 2499.0;
     } else {
         return res.status(400).json({ error: "Invalid tier" });
@@ -439,6 +441,31 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: "Transcription failed" });
   }
+});
+
+// --- CLEAN URL HANDLER (MUST BE LAST) ---
+app.get('*', (req, res, next) => {
+  // If request is for an API, skip
+  if (req.path.startsWith('/api')) return next();
+  
+  // If request implies a specific file extension (e.g. .css, .js), skip and let static handler deal with it
+  if (req.path.includes('.')) return next();
+
+  // Map root to index.html
+  if (req.path === '/') {
+      return res.sendFile(path.join(__dirname, 'index.html'));
+  }
+
+  // Otherwise, try to find a matching .html file
+  const filePath = path.join(__dirname, req.path + '.html');
+  
+  // Use res.sendFile with error callback to handle missing files
+  res.sendFile(filePath, (err) => {
+      if (err) {
+          // If file not found, you could send a 404 page or just call next()
+          next(); 
+      }
+  });
 });
 
 app.listen(PORT, () => {
