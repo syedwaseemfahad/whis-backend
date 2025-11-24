@@ -41,13 +41,13 @@ mongoose
   .then(() => console.log("✅ Connected to MongoDB"))
   .catch((err) => console.error("❌ MongoDB connection error:", err));
 
-// --- 2. User Schema (Expanded for detailed tracking) ---
+// --- 2. User Schema ---
 const userSchema = new mongoose.Schema({
   googleId: { type: String, unique: true, required: true },
   email: { type: String, required: true },
   name: String,
   avatarUrl: String,
-  phone: String, // Added to track user phone if provided
+  phone: String,
   subscription: {
     status: { type: String, enum: ["active", "inactive", "past_due"], default: "inactive" },
     tier: { type: String, enum: ["free", "pro", "pro_plus"], default: "free" },
@@ -60,18 +60,18 @@ const userSchema = new mongoose.Schema({
   },
   orders: [
     {
-      orderId: String,          // Razorpay Order ID
-      paymentId: String,        // Razorpay Payment ID
-      signature: String,        // Razorpay Signature
+      orderId: String,          
+      paymentId: String,        
+      signature: String,        
       amount: Number,
       currency: String,
       date: Date,
-      status: String,           // created, paid, failed
+      status: String,
       tier: String, 
       cycle: String,
-      method: String,           // card, upi, netbanking, etc.
+      method: String,
       receipt: String,
-      notes: Object             // Extra metadata
+      notes: Object
     }
   ],
   createdAt: { type: Date, default: Date.now },
@@ -217,17 +217,20 @@ app.get("/api/user/status", async (req, res) => {
   }
 });
 
-// 3. CREATE RAZORPAY ORDER
+// 3. CREATE RAZORPAY ORDER (UPDATED FOR ₹1 TESTING)
 app.post("/api/payment/create-order", async (req, res) => {
   try {
     const { googleId, tier, cycle } = req.body; 
     const user = await User.findOne({ googleId });
     if (!user) return res.status(404).json({ error: "User not found" });
 
-    let amount = 1.0;
-    // Amounts in PAISE (Razorpay uses smallest currency unit)
-    if (tier === "pro") amount = (cycle === "annual") ? 4788.0 : 799.0;
-    else if (tier === "pro_plus") amount = (cycle === "annual") ? 11988.0 : 1999.0;
+    // --- PRICING LOGIC ---
+    // FOR TESTING: FORCE PRICE TO ₹1
+    let amount = 1.0; 
+    
+    // OLD LOGIC (Commented out for future reference)
+    // if (tier === "pro") amount = (cycle === "annual") ? 4788.0 : 799.0;
+    // else if (tier === "pro_plus") amount = (cycle === "annual") ? 11988.0 : 1999.0;
 
     const amountInPaise = Math.round(amount * 100);
     const receiptId = `rcpt_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
@@ -265,7 +268,7 @@ app.post("/api/payment/create-order", async (req, res) => {
       order_id: order.id, 
       amount: amountInPaise,
       currency: "INR",
-      key_id: RAZORPAY_KEY_ID, // Send key_id to frontend
+      key_id: RAZORPAY_KEY_ID, 
       user_name: user.name,
       user_email: user.email,
       user_contact: user.phone || "" 
@@ -295,25 +298,22 @@ app.post("/api/payment/verify", async (req, res) => {
 
       const order = user.orders.find((o) => o.orderId === razorpay_order_id);
       
-      // Fetch Detailed Payment Info from Razorpay to store method (UPI/Card etc)
       let paymentMethod = "unknown";
       try {
         const paymentDetails = await razorpay.payments.fetch(razorpay_payment_id);
         paymentMethod = paymentDetails.method;
         if(paymentDetails.contact && !user.phone) {
-            user.phone = paymentDetails.contact; // Save phone if we didn't have it
+            user.phone = paymentDetails.contact; 
         }
       } catch (e) {
         console.error("Could not fetch extended payment details", e);
       }
 
-      // Update User Subscription
       user.subscription.status = "active";
       user.subscription.tier = order?.tier || "pro";
       const days = order?.cycle === "annual" ? 365 : 30;
       user.subscription.validUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
 
-      // Update Order Details
       if (order) {
         order.status = "paid";
         order.paymentId = razorpay_payment_id;
