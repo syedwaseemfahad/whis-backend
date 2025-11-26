@@ -7,6 +7,7 @@ const mongoose = require("mongoose");
 const Razorpay = require("razorpay");
 const crypto = require("crypto");
 const path = require("path");
+const url = require("url"); // Native node module for parsing URLs
 
 // --- CONFIGURATION ---
 const PORT = process.env.PORT || 4000;
@@ -18,7 +19,7 @@ const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
 const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
 
 // --- INITIAL CHECKS ---
-console.log("--- 🚀 STARTING SERVER ---");
+console.log("--- 🚀 STARTING SERVER WITH ENHANCED ANALYTICS ---");
 if (!OPENAI_API_KEY) console.error("⚠️  MISSING: OPENAI_API_KEY");
 if (!RAZORPAY_KEY_ID) console.error("⚠️  MISSING: RAZORPAY_KEY_ID");
 if (!RAZORPAY_KEY_SECRET) console.error("⚠️  MISSING: RAZORPAY_KEY_SECRET");
@@ -45,17 +46,30 @@ mongoose
 
 // --- 2. SCHEMAS ---
 
-// A. Metric Schema
+// A. Metric Schema (UPGRADED)
 const metricSchema = new mongoose.Schema({
-  date: { type: String, required: true },
+  date: { type: String, required: true }, // YYYY-MM-DD
   ip: { type: String, required: true },
-  hits: { type: Number, default: 1 },
-  userId: String,
-  userAgent: String,
-  routesAccessed: [{ type: String }],
+  hits: { type: Number, default: 1 }, // Total raw hits
+  
+  // -- NEW ANALYTICS FIELDS --
+  referrers: [String], // e.g. ["google.com", "instagram.com"]
+  os: String,          // e.g. "Windows", "Mac", "Android"
+  isMobile: Boolean,   // true/false
+  
+  // Specific Feature Counters
+  stats: {
+    chat: { type: Number, default: 0 },
+    transcribe: { type: Number, default: 0 },
+    payment: { type: Number, default: 0 }
+  },
+  
+  userId: String, // Linked Google ID if logged in
   lastActive: { type: Date, default: Date.now }
 });
+// Compound index for fast upserts
 metricSchema.index({ date: 1, ip: 1 }, { unique: true });
+
 const Metric = mongoose.model("Metric", metricSchema);
 
 // B. User Schema
@@ -96,43 +110,76 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model("User", userSchema);
 
-// --------- 3. GLOBAL LOGGING & TRAFFIC TRACKING ---------
+// --------- 3. SMART TRAFFIC TRACKING MIDDLEWARE ---------
 app.use(async (req, res, next) => {
-  // 1. Filter out noise (images/css/js)
+  // 1. Filter out static noise (images/css/js) to save DB writes
   const isStatic = req.path.match(/\.(css|js|png|jpg|jpeg|ico|svg|woff|woff2)$/);
   
   if (!isStatic) {
-    // 2. Log the Incoming Request
-    console.log(`📥 [REQ] ${req.method} ${req.path} | IP: ${req.ip}`);
+    console.log(`📥 [REQ] ${req.method} ${req.path}`); // Lightweight console log
   }
 
-  // 3. Traffic Analytics Logic
-  if (req.path.match(/\.(css|js|png|jpg|jpeg|ico|svg|woff|woff2)$/)) {
-    return next(); // Skip analytics for static files
-  }
+  // If it's a static file, we skip the DB logic entirely to be fast
+  if (isStatic) return next();
 
   try {
+    // --- DATA EXTRACTION ---
     const today = new Date().toISOString().slice(0, 10);
     const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
-    const userAgent = req.get('User-Agent');
+    const ua = req.get('User-Agent') || "";
+    const referrerHeader = req.get('Referrer') || req.get('Referer');
     const googleId = req.headers["x-google-id"] || req.body.googleId;
 
+    // A. Parse OS & Device
+    let os = "Unknown";
+    let isMobile = /mobile|android|iphone|ipad|phone/i.test(ua);
+    
+    if (/windows/i.test(ua)) os = "Windows";
+    else if (/macintosh|mac os/i.test(ua)) os = "Mac";
+    else if (/linux/i.test(ua)) os = "Linux";
+    else if (/android/i.test(ua)) os = "Android";
+    else if (/ios|iphone|ipad/i.test(ua)) os = "iOS";
+
+    // B. Parse Referrer (Extract domain only)
+    let referrerDomain = null;
+    if (referrerHeader) {
+        try {
+            const parsedUrl = new URL(referrerHeader);
+            referrerDomain = parsedUrl.hostname; // e.g., "instagram.com"
+        } catch (e) { /* ignore invalid urls */ }
+    }
+
+    // C. Determine Feature Usage
+    const updates = { 
+        $inc: { hits: 1 }, // Always increment total hits
+        $set: { lastActive: new Date(), os: os, isMobile: isMobile },
+        $addToSet: {} // Container for array updates
+    };
+
+    // Increment specific counters based on path
+    if (req.path.includes("/chat-stream")) updates.$inc["stats.chat"] = 1;
+    else if (req.path.includes("/transcribe")) updates.$inc["stats.transcribe"] = 1;
+    else if (req.path.includes("/payment")) updates.$inc["stats.payment"] = 1;
+
+    // Add referrer if it exists
+    if (referrerDomain) {
+        updates.$addToSet["referrers"] = referrerDomain;
+    } else {
+        delete updates.$addToSet; // Remove if empty to avoid mongo error
+    }
+
+    // Add UserID if found
+    if (googleId) updates.$set["userId"] = googleId;
+
+    // --- DB UPSERT ---
     await Metric.findOneAndUpdate(
       { date: today, ip: ip },
-      { 
-        $inc: { hits: 1 },
-        $addToSet: { routesAccessed: req.path },
-        $set: { 
-          lastActive: new Date(),
-          userAgent: userAgent,
-          ...(googleId && { userId: googleId })
-        }
-      },
+      updates,
       { upsert: true, new: true }
     );
-    if (!isStatic) console.log(`📊 [TRAFFIC] Logged hit for IP: ${ip}`);
+
   } catch (error) {
-    console.error("⚠️ [TRAFFIC] Logging failed:", error.message);
+    console.error("⚠️ [ANALYTICS] Logging failed:", error.message);
   }
 
   next();
@@ -141,11 +188,8 @@ app.use(async (req, res, next) => {
 // Serve Static Files
 app.use(express.static(__dirname));
 
-// --------- Middleware (Auth Guard) ---------
+// --------- Middleware (Auth Guard marker) ---------
 app.use((req, res, next) => {
-  if (req.path.startsWith("/api/")) {
-    // Just a marker for API requests
-  }
   next();
 });
 
@@ -153,44 +197,35 @@ const conversations = new Map();
 
 // --- Helper: Usage Check ---
 async function checkAndIncrementUsage(googleId) {
-  console.log(`🔎 [USAGE] Checking limits for User: ${googleId}`);
   const today = new Date().toISOString().slice(0, 10);
   const user = await User.findOne({ googleId });
    
-  if (!user) {
-    console.error(`❌ [USAGE] User not found: ${googleId}`);
-    return { allowed: false, error: "User not found" };
-  }
+  if (!user) return { allowed: false, error: "User not found" };
 
   // Check Paid Status
   if (user.subscription.status === 'active' && ['pro', 'pro_plus'].includes(user.subscription.tier)) {
      if (user.subscription.validUntil && new Date() > user.subscription.validUntil) {
-         console.log(`⚠️ [USAGE] Subscription EXPIRED for ${user.email}. Downgrading.`);
+         console.log(`⚠️ [USAGE] Expired sub for ${user.email}`);
          user.subscription.status = 'inactive';
          user.subscription.tier = 'free';
          await user.save();
      } else {
-         console.log(`✅ [USAGE] PRO Access Granted: ${user.subscription.tier}`);
          return { allowed: true, tier: user.subscription.tier };
      }
   }
 
   // Free Tier Logic
   if (user.freeUsage.lastDate !== today) {
-    console.log(`🔄 [USAGE] Resetting daily free count for ${user.email}`);
     user.freeUsage.count = 0;
     user.freeUsage.lastDate = today;
   }
 
-  // Limit: 10
   if (user.freeUsage.count >= 10) {
-    console.warn(`⛔ [USAGE] Daily limit reached for ${user.email} (Count: ${user.freeUsage.count})`);
     return { allowed: false, error: "Daily limit reached" };
   }
 
   user.freeUsage.count += 1;
   await user.save();
-  console.log(`✅ [USAGE] Free usage incremented. Count: ${user.freeUsage.count}/10`);
   return { allowed: true, tier: 'free', remaining: 10 - user.freeUsage.count };
 }
 
@@ -198,26 +233,18 @@ async function checkAndIncrementUsage(googleId) {
 
 // 1. AUTH
 app.post("/api/auth/google", async (req, res) => {
-  console.log("👤 [AUTH] Google Login Attempt...");
+  console.log("👤 [AUTH] Login Request");
   try {
     const { token, tokens } = req.body;
     const idToken = token || (tokens && tokens.id_token);
 
-    if (!idToken) {
-        console.error("❌ [AUTH] Missing ID Token");
-        return res.status(400).json({ error: "Missing ID Token" });
-    }
+    if (!idToken) return res.status(400).json({ error: "Missing ID Token" });
 
     const googleRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${idToken}`);
-    if (!googleRes.ok) {
-        console.error("❌ [AUTH] Invalid Google Token");
-        return res.status(401).json({ error: "Invalid Google Token" });
-    }
+    if (!googleRes.ok) return res.status(401).json({ error: "Invalid Google Token" });
 
     const payload = await googleRes.json();
     const { sub: googleId, email, name, picture: avatarUrl } = payload;
-
-    console.log(`👤 [AUTH] Verified: ${email} (${name})`);
 
     const user = await User.findOneAndUpdate(
       { googleId },
@@ -234,7 +261,7 @@ app.post("/api/auth/google", async (req, res) => {
     );
     res.json({ success: true, user });
   } catch (err) {
-    console.error("❌ [AUTH] DB/Server Error:", err);
+    console.error("❌ [AUTH] Error:", err);
     res.status(500).json({ error: "Database error" });
   }
 });
@@ -248,9 +275,7 @@ app.get("/api/user/status", async (req, res) => {
     const user = await User.findOne({ googleId });
     if (!user) return res.json({ active: false, tier: null });
 
-    // 1. Check Subscription Expiry
     if (user.subscription.status === "active" && user.subscription.validUntil && new Date() > user.subscription.validUntil) {
-      console.log(`📉 [STATUS] Subscription expired naturally for ${user.email}`);
       user.subscription.status = "inactive";
       user.subscription.tier = "free";
       await user.save();
@@ -264,22 +289,18 @@ app.get("/api/user/status", async (req, res) => {
       orders: user.orders ? user.orders.sort((a,b) => new Date(b.date) - new Date(a.date)) : []
     });
   } catch (err) {
-    console.error("❌ [STATUS] Error:", err);
     res.status(500).json({ error: "Failed to check status" });
   }
 });
 
 // 3. CREATE RAZORPAY ORDER
 app.post("/api/payment/create-order", async (req, res) => {
-  console.log("💳 [PAYMENT] Create Order Request...");
+  console.log("💳 [PAYMENT] Creating Order...");
   try {
     const { googleId, tier, cycle } = req.body; 
-    console.log(`💳 [PAYMENT] Tier: ${tier}, Cycle: ${cycle}, User: ${googleId}`);
-
     const user = await User.findOne({ googleId });
     if (!user) return res.status(404).json({ error: "User not found" });
 
-    // --- PRICING LOGIC ---
     let amount = 0;
     if (tier === "pro") amount = (cycle === "annual") ? 5988.0 : 999.0;
     else if (tier === "pro_plus") amount = (cycle === "annual") ? 11988.0 : 2499.0;
@@ -296,9 +317,7 @@ app.post("/api/payment/create-order", async (req, res) => {
     };
 
     const order = await razorpay.orders.create(options);
-    if (!order) throw new Error("Razorpay returned null order");
-
-    console.log(`💳 [PAYMENT] Order Created! ID: ${order.id}`);
+    if (!order) throw new Error("Razorpay creation failed");
 
     user.orders.push({ 
       orderId: order.id, 
@@ -319,42 +338,30 @@ app.post("/api/payment/create-order", async (req, res) => {
       user_contact: user.phone || "" 
     });
   } catch (err) {
-    console.error("❌ [PAYMENT] Create Order Failed:", err);
+    console.error("❌ [PAYMENT] Order Error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
 // 4. VERIFY RAZORPAY PAYMENT
 app.post("/api/payment/verify", async (req, res) => {
-  console.log("💳 [PAYMENT] Verifying Payment...");
   try {
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
-
     const body = razorpay_order_id + "|" + razorpay_payment_id;
-    const expectedSignature = crypto
-      .createHmac("sha256", RAZORPAY_KEY_SECRET)
-      .update(body.toString())
-      .digest("hex");
+    const expectedSignature = crypto.createHmac("sha256", RAZORPAY_KEY_SECRET).update(body.toString()).digest("hex");
 
     if (expectedSignature === razorpay_signature) {
-      console.log("✅ [PAYMENT] Signature Matches. Payment Valid.");
       const user = await User.findOne({ "orders.orderId": razorpay_order_id });
-      
-      if (!user) {
-        console.error("❌ [PAYMENT] User not found for order:", razorpay_order_id);
-        return res.status(404).json({ error: "Order not found attached to user" });
-      }
+      if (!user) return res.status(404).json({ error: "Order not found" });
 
       const order = user.orders.find((o) => o.orderId === razorpay_order_id);
       
-      // Fetch details from Razorpay to get method/phone
       try {
         const paymentDetails = await razorpay.payments.fetch(razorpay_payment_id);
-        if (order) order.method = paymentDetails.method;
-        if (paymentDetails.contact && !user.phone) user.phone = paymentDetails.contact;
-      } catch (e) { console.warn("⚠️ [PAYMENT] Could not fetch details from Razorpay API"); }
+        if(paymentDetails.contact && !user.phone) user.phone = paymentDetails.contact; 
+        if(order) order.method = paymentDetails.method;
+      } catch (e) { console.warn("Could not fetch payment details"); }
 
-      // ACTIVATE SUB
       user.subscription.status = "active";
       user.subscription.tier = order?.tier || "pro";
       const days = order?.cycle === "annual" ? 365 : 30;
@@ -367,15 +374,13 @@ app.post("/api/payment/verify", async (req, res) => {
       }
       
       await user.save();
-      console.log(`🎉 [PAYMENT] User ${user.email} upgraded to ${user.subscription.tier}`);
+      console.log(`✅ [PAYMENT] Verified for ${user.email}`);
       return res.json({ status: "success", success: true });
-
     } else {
-      console.error("❌ [PAYMENT] Invalid Signature!");
       return res.status(400).json({ status: "failure", success: false, error: "Invalid Signature" });
     }
   } catch (err) {
-    console.error("❌ [PAYMENT] Verification Error:", err);
+    console.error("❌ [PAYMENT] Verify Error:", err);
     res.status(500).json({ error: "Verification failed" });
   }
 });
@@ -383,42 +388,28 @@ app.post("/api/payment/verify", async (req, res) => {
 // 5. STREAM CHAT
 app.post("/api/chat-stream", async (req, res) => {
   const googleId = req.headers["x-google-id"];
-  console.log("🤖 [AI] Chat Stream Request initiated");
-
+   
   if (googleId) {
     const check = await checkAndIncrementUsage(googleId);
-    if (!check.allowed) {
-        console.warn(`⛔ [AI] Blocked request for ${googleId}: Limit reached`);
-        return res.status(403).json({ error: "Daily limit reached. Please upgrade to Pro." });
-    }
+    if (!check.allowed) return res.status(403).json({ error: "Limit reached" });
   }
 
   const { conversationId, message } = req.body || {};
-  
-  if (!message || !message.role) {
-    console.error("❌ [AI] Invalid Body Format");
-    return res.status(400).json({ error: "Invalid Body" });
-  }
+  if (!message || !message.role) return res.status(400).json({ error: "Invalid Body" });
 
   let convId = conversationId || `conv_${Date.now()}`;
   const history = conversations.get(convId) || [];
 
-  // Prepare OpenAI Message
-  let newMessage;
+  let newMessage = { role: message.role, content: message.content };
   if (message.screenshot) {
-    console.log("📸 [AI] Processing Screenshot...");
-    let screenshot = message.screenshot;
-    if (!screenshot.startsWith("data:image")) screenshot = `data:image/png;base64,${screenshot}`;
-    
+    let sc = message.screenshot.startsWith("data:image") ? message.screenshot : `data:image/png;base64,${message.screenshot}`;
     newMessage = { 
         role: message.role, 
         content: [
-            { type: "text", text: message.content || "Analyze this screenshot contextually." },
-            { type: "image_url", image_url: { url: screenshot } }
+            { type: "text", text: message.content || "Analyze screenshot." },
+            { type: "image_url", image_url: { url: sc } }
         ]
     };
-  } else {
-    newMessage = { role: message.role, content: message.content };
   }
 
   history.push(newMessage);
@@ -431,34 +422,20 @@ app.post("/api/chat-stream", async (req, res) => {
   try {
     const openaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: history,
-        temperature: 0.6,
-        stream: true
-      })
+      headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "gpt-4o-mini", messages: history, temperature: 0.6, stream: true })
     });
 
     if (!openaiRes.ok) {
-      const errText = await openaiRes.text();
-      console.error(`❌ [AI] OpenAI API Error: ${openaiRes.status}`, errText);
-      res.statusCode = 500;
-      res.end(`OpenAI Error: ${openaiRes.status}`);
-      return;
+        res.statusCode = 500;
+        res.end(`OpenAI Error: ${openaiRes.status}`);
+        return;
     }
 
-    console.log("🌊 [AI] Streaming response...");
-    for await (const chunk of openaiRes.body) {
-      res.write(chunk);
-    }
-    console.log("✅ [AI] Stream finished.");
+    for await (const chunk of openaiRes.body) res.write(chunk);
     res.end();
   } catch (err) {
-    console.error("❌ [AI] Internal Stream Error:", err);
+    console.error("❌ [AI] Stream Error:", err);
     res.statusCode = 500;
     res.end("Internal Stream Error");
   }
@@ -466,13 +443,8 @@ app.post("/api/chat-stream", async (req, res) => {
 
 // 6. TRANSCRIPTION
 app.post("/api/transcribe", upload.single("file"), async (req, res) => {
-  console.log("🎙️ [TRANSCRIPTION] Received Audio File");
   try {
-    if (!req.file) {
-        console.error("❌ [TRANSCRIPTION] No file provided");
-        return res.status(400).json({ error: "Missing file" });
-    }
-
+    if (!req.file) return res.status(400).json({ error: "Missing file" });
     const mime = req.file.mimetype || "audio/webm";
     const filename = req.file.originalname || "audio.webm";
 
@@ -490,10 +462,9 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
     const data = await openaiRes.json();
     if (!openaiRes.ok) throw new Error(data.error?.message || "OpenAI Error");
 
-    console.log("✅ [TRANSCRIPTION] Success");
     res.json({ text: data.text || "" });
   } catch (err) {
-    console.error("❌ [TRANSCRIPTION] Failed:", err.message);
+    console.error("❌ [TRANSCRIPTION] Error:", err.message);
     res.status(500).json({ error: "Transcription failed" });
   }
 });
@@ -502,17 +473,13 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api')) return next();
   if (req.path.includes('.')) return next();
-
-  if (req.path === '/') {
-      return res.sendFile(path.join(__dirname, 'index.html'));
-  }
-
-  const filePath = path.join(__dirname, req.path + '.html');
-  res.sendFile(filePath, (err) => {
+  if (req.path === '/') return res.sendFile(path.join(__dirname, 'index.html'));
+  
+  res.sendFile(path.join(__dirname, req.path + '.html'), (err) => {
       if (err) next(); 
   });
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 [SERVER] Listening on http://localhost:${PORT}`);
+  console.log(`✅ Backend listening on http://localhost:${PORT}`);
 });
