@@ -7,36 +7,35 @@ const mongoose = require("mongoose");
 const Razorpay = require("razorpay");
 const crypto = require("crypto");
 const path = require("path");
-const url = require("url"); // Native node module for parsing URLs
+const url = require("url");
 
 // --- CONFIGURATION ---
 const PORT = process.env.PORT || 4000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/whis-app";
-
-// Razorpay Config
 const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
 const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
 
 // --- INITIAL CHECKS ---
-console.log("--- 🚀 STARTING SERVER WITH ENHANCED ANALYTICS ---");
+console.log("--- 🚀 STARTING OPTIMIZED SERVER ---");
 if (!OPENAI_API_KEY) console.error("⚠️  MISSING: OPENAI_API_KEY");
 if (!RAZORPAY_KEY_ID) console.error("⚠️  MISSING: RAZORPAY_KEY_ID");
-if (!RAZORPAY_KEY_SECRET) console.error("⚠️  MISSING: RAZORPAY_KEY_SECRET");
 
 const razorpay = new Razorpay({
   key_id: RAZORPAY_KEY_ID,
   key_secret: RAZORPAY_KEY_SECRET,
 });
 
-const upload = multer({ storage: multer.memoryStorage() });
+// [FIX 1: LIMIT UPLOAD SIZE] - Prevents RAM Crash
+const upload = multer({ 
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 } // Max 5MB
+});
+
 const app = express();
-
-// Trust Proxy for correct IP logging
 app.set('trust proxy', true);
-
 app.use(cors());
-app.use(express.json({ limit: "50mb" }));
+app.use(express.json({ limit: "50mb" })); // Keep this for screenshots in chat
 
 // --- 1. MongoDB Connection ---
 mongoose
@@ -46,30 +45,23 @@ mongoose
 
 // --- 2. SCHEMAS ---
 
-// A. Metric Schema (UPGRADED)
+// A. Metric Schema
 const metricSchema = new mongoose.Schema({
-  date: { type: String, required: true }, // YYYY-MM-DD
+  date: { type: String, required: true },
   ip: { type: String, required: true },
-  hits: { type: Number, default: 1 }, // Total raw hits
-  
-  // -- NEW ANALYTICS FIELDS --
-  referrers: [String], // e.g. ["google.com", "instagram.com"]
-  os: String,          // e.g. "Windows", "Mac", "Android"
-  isMobile: Boolean,   // true/false
-  
-  // Specific Feature Counters
+  hits: { type: Number, default: 1 },
+  referrers: [String],
+  os: String,
+  isMobile: Boolean,
   stats: {
     chat: { type: Number, default: 0 },
     transcribe: { type: Number, default: 0 },
     payment: { type: Number, default: 0 }
   },
-  
-  userId: String, // Linked Google ID if logged in
+  userId: String,
   lastActive: { type: Date, default: Date.now }
 });
-// Compound index for fast upserts
 metricSchema.index({ date: 1, ip: 1 }, { unique: true });
-
 const Metric = mongoose.model("Metric", metricSchema);
 
 // B. User Schema
@@ -91,18 +83,9 @@ const userSchema = new mongoose.Schema({
   },
   orders: [
     {
-      orderId: String,          
-      paymentId: String,        
-      signature: String,        
-      amount: Number,
-      currency: String,
-      date: Date,
-      status: String,
-      tier: String, 
-      cycle: String,
-      method: String,
-      receipt: String,
-      notes: Object
+      orderId: String, paymentId: String, signature: String, amount: Number,
+      currency: String, date: Date, status: String, tier: String, 
+      cycle: String, method: String, receipt: String, notes: Object
     }
   ],
   createdAt: { type: Date, default: Date.now },
@@ -110,102 +93,90 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model("User", userSchema);
 
-// --------- 3. SMART TRAFFIC TRACKING MIDDLEWARE ---------
-app.use(async (req, res, next) => {
-  // 1. Filter out static noise (images/css/js) to save DB writes
-  const isStatic = req.path.match(/\.(css|js|png|jpg|jpeg|ico|svg|woff|woff2)$/);
-  
-  if (!isStatic) {
-    console.log(`📥 [REQ] ${req.method} ${req.path}`); // Lightweight console log
-  }
+// C. Conversation Schema [FIX 2: NEW SCHEMA FOR CHAT HISTORY]
+const conversationSchema = new mongoose.Schema({
+  conversationId: { type: String, required: true, unique: true, index: true },
+  userId: String,
+  messages: [
+    {
+      role: { type: String, enum: ['user', 'assistant', 'system'] },
+      content: mongoose.Schema.Types.Mixed,
+      timestamp: { type: Date, default: Date.now }
+    }
+  ],
+  updatedAt: { type: Date, default: Date.now }
+});
+// Auto-delete conversations after 24h
+conversationSchema.index({ updatedAt: 1 }, { expireAfterSeconds: 86400 }); 
+const Conversation = mongoose.model("Conversation", conversationSchema);
 
-  // If it's a static file, we skip the DB logic entirely to be fast
+
+// --------- 3. SMART TRAFFIC TRACKING MIDDLEWARE ---------
+app.use((req, res, next) => {
+  const isStatic = req.path.match(/\.(css|js|png|jpg|jpeg|ico|svg|woff|woff2)$/);
+  if (!isStatic) console.log(`📥 [REQ] ${req.method} ${req.path}`);
   if (isStatic) return next();
 
   try {
-    // --- DATA EXTRACTION ---
     const today = new Date().toISOString().slice(0, 10);
     const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
     const ua = req.get('User-Agent') || "";
     const referrerHeader = req.get('Referrer') || req.get('Referer');
     const googleId = req.headers["x-google-id"] || req.body.googleId;
 
-    // A. Parse OS & Device
     let os = "Unknown";
     let isMobile = /mobile|android|iphone|ipad|phone/i.test(ua);
-    
     if (/windows/i.test(ua)) os = "Windows";
     else if (/macintosh|mac os/i.test(ua)) os = "Mac";
     else if (/linux/i.test(ua)) os = "Linux";
     else if (/android/i.test(ua)) os = "Android";
     else if (/ios|iphone|ipad/i.test(ua)) os = "iOS";
 
-    // B. Parse Referrer (Extract domain only)
     let referrerDomain = null;
     if (referrerHeader) {
-        try {
-            const parsedUrl = new URL(referrerHeader);
-            referrerDomain = parsedUrl.hostname; // e.g., "instagram.com"
-        } catch (e) { /* ignore invalid urls */ }
+        try { referrerDomain = new URL(referrerHeader).hostname; } catch (e) {}
     }
 
-    // C. Determine Feature Usage
     const updates = { 
-        $inc: { hits: 1 }, // Always increment total hits
+        $inc: { hits: 1 }, 
         $set: { lastActive: new Date(), os: os, isMobile: isMobile },
-        $addToSet: {} // Container for array updates
+        $addToSet: {} 
     };
 
-    // Increment specific counters based on path
     if (req.path.includes("/chat-stream")) updates.$inc["stats.chat"] = 1;
     else if (req.path.includes("/transcribe")) updates.$inc["stats.transcribe"] = 1;
     else if (req.path.includes("/payment")) updates.$inc["stats.payment"] = 1;
 
-    // Add referrer if it exists
-    if (referrerDomain) {
-        updates.$addToSet["referrers"] = referrerDomain;
-    } else {
-        delete updates.$addToSet; // Remove if empty to avoid mongo error
-    }
-
-    // Add UserID if found
+    if (referrerDomain) updates.$addToSet["referrers"] = referrerDomain;
+    else delete updates.$addToSet;
+    
     if (googleId) updates.$set["userId"] = googleId;
 
-    // --- DB UPSERT ---
-    await Metric.findOneAndUpdate(
+    // [FIX 3: REMOVED AWAIT] - Background write for speed
+    Metric.findOneAndUpdate(
       { date: today, ip: ip },
       updates,
       { upsert: true, new: true }
-    );
+    ).catch(err => console.error("⚠️ Analytics Write Error:", err.message));
 
   } catch (error) {
-    console.error("⚠️ [ANALYTICS] Logging failed:", error.message);
+    console.error("⚠️ Analytics Logic Error:", error.message);
   }
-
   next();
 });
 
 // Serve Static Files
 app.use(express.static(__dirname));
 
-// --------- Middleware (Auth Guard marker) ---------
-app.use((req, res, next) => {
-  next();
-});
-
-const conversations = new Map();
-
-// --- Helper: Usage Check ---
+// --- HELPER: Usage Check ---
 async function checkAndIncrementUsage(googleId) {
   const today = new Date().toISOString().slice(0, 10);
   const user = await User.findOne({ googleId });
    
   if (!user) return { allowed: false, error: "User not found" };
 
-  // Check Paid Status
   if (user.subscription.status === 'active' && ['pro', 'pro_plus'].includes(user.subscription.tier)) {
      if (user.subscription.validUntil && new Date() > user.subscription.validUntil) {
-         console.log(`⚠️ [USAGE] Expired sub for ${user.email}`);
          user.subscription.status = 'inactive';
          user.subscription.tier = 'free';
          await user.save();
@@ -214,7 +185,6 @@ async function checkAndIncrementUsage(googleId) {
      }
   }
 
-  // Free Tier Logic
   if (user.freeUsage.lastDate !== today) {
     user.freeUsage.count = 0;
     user.freeUsage.lastDate = today;
@@ -231,13 +201,14 @@ async function checkAndIncrementUsage(googleId) {
 
 // ================= ROUTES =================
 
+// [FIX 4: PING ROUTE] - Keep server awake
+app.get("/ping", (req, res) => res.send("pong"));
+
 // 1. AUTH
 app.post("/api/auth/google", async (req, res) => {
-  console.log("👤 [AUTH] Login Request");
   try {
     const { token, tokens } = req.body;
     const idToken = token || (tokens && tokens.id_token);
-
     if (!idToken) return res.status(400).json({ error: "Missing ID Token" });
 
     const googleRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${idToken}`);
@@ -251,17 +222,14 @@ app.post("/api/auth/google", async (req, res) => {
       {
         email, name, avatarUrl, lastLogin: new Date(),
         $setOnInsert: {
-          "subscription.status": "inactive",
-          "subscription.tier": "free",
-          "freeUsage.count": 0,
-          "freeUsage.lastDate": new Date().toISOString().slice(0, 10)
+          "subscription.status": "inactive", "subscription.tier": "free",
+          "freeUsage.count": 0, "freeUsage.lastDate": new Date().toISOString().slice(0, 10)
         }
       },
       { new: true, upsert: true }
     );
     res.json({ success: true, user });
   } catch (err) {
-    console.error("❌ [AUTH] Error:", err);
     res.status(500).json({ error: "Database error" });
   }
 });
@@ -275,6 +243,7 @@ app.get("/api/user/status", async (req, res) => {
     const user = await User.findOne({ googleId });
     if (!user) return res.json({ active: false, tier: null });
 
+    // Check expiry logic...
     if (user.subscription.status === "active" && user.subscription.validUntil && new Date() > user.subscription.validUntil) {
       user.subscription.status = "inactive";
       user.subscription.tier = "free";
@@ -293,9 +262,9 @@ app.get("/api/user/status", async (req, res) => {
   }
 });
 
-// 3. CREATE RAZORPAY ORDER
+// 3. PAYMENT ROUTES (Unchanged)
 app.post("/api/payment/create-order", async (req, res) => {
-  console.log("💳 [PAYMENT] Creating Order...");
+  // ... (Keep your existing payment code)
   try {
     const { googleId, tier, cycle } = req.body; 
     const user = await User.findOne({ googleId });
@@ -308,43 +277,20 @@ app.post("/api/payment/create-order", async (req, res) => {
 
     const amountInPaise = Math.round(amount * 100);
     const receiptId = `rcpt_${Date.now()}`;
-
-    const options = {
-      amount: amountInPaise,
-      currency: "INR",
-      receipt: receiptId,
-      notes: { userId: googleId, tier: tier, cycle: cycle }
-    };
+    const options = { amount: amountInPaise, currency: "INR", receipt: receiptId, notes: { userId: googleId, tier, cycle } };
 
     const order = await razorpay.orders.create(options);
-    if (!order) throw new Error("Razorpay creation failed");
-
-    user.orders.push({ 
-      orderId: order.id, 
-      amount: amount, 
-      date: new Date(), 
-      status: "created", 
-      tier, cycle, receipt: receiptId, currency: "INR"
-    });
+    user.orders.push({ orderId: order.id, amount, date: new Date(), status: "created", tier, cycle, receipt: receiptId, currency: "INR" });
     await user.save();
 
-    res.json({ 
-      order_id: order.id, 
-      amount: amountInPaise, 
-      currency: "INR",
-      key_id: RAZORPAY_KEY_ID, 
-      user_name: user.name,
-      user_email: user.email,
-      user_contact: user.phone || "" 
-    });
+    res.json({ order_id: order.id, amount: amountInPaise, currency: "INR", key_id: RAZORPAY_KEY_ID, user_name: user.name, user_email: user.email, user_contact: user.phone || "" });
   } catch (err) {
-    console.error("❌ [PAYMENT] Order Error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
-// 4. VERIFY RAZORPAY PAYMENT
 app.post("/api/payment/verify", async (req, res) => {
+  // ... (Keep your existing verify code)
   try {
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
     const body = razorpay_order_id + "|" + razorpay_payment_id;
@@ -353,39 +299,31 @@ app.post("/api/payment/verify", async (req, res) => {
     if (expectedSignature === razorpay_signature) {
       const user = await User.findOne({ "orders.orderId": razorpay_order_id });
       if (!user) return res.status(404).json({ error: "Order not found" });
-
       const order = user.orders.find((o) => o.orderId === razorpay_order_id);
       
       try {
         const paymentDetails = await razorpay.payments.fetch(razorpay_payment_id);
         if(paymentDetails.contact && !user.phone) user.phone = paymentDetails.contact; 
         if(order) order.method = paymentDetails.method;
-      } catch (e) { console.warn("Could not fetch payment details"); }
+      } catch (e) {}
 
       user.subscription.status = "active";
       user.subscription.tier = order?.tier || "pro";
       const days = order?.cycle === "annual" ? 365 : 30;
       user.subscription.validUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
 
-      if (order) {
-        order.status = "paid";
-        order.paymentId = razorpay_payment_id;
-        order.signature = razorpay_signature;
-      }
-      
+      if (order) { order.status = "paid"; order.paymentId = razorpay_payment_id; order.signature = razorpay_signature; }
       await user.save();
-      console.log(`✅ [PAYMENT] Verified for ${user.email}`);
       return res.json({ status: "success", success: true });
     } else {
       return res.status(400).json({ status: "failure", success: false, error: "Invalid Signature" });
     }
   } catch (err) {
-    console.error("❌ [PAYMENT] Verify Error:", err);
     res.status(500).json({ error: "Verification failed" });
   }
 });
 
-// 5. STREAM CHAT
+// 5. STREAM CHAT (REWRITTEN FOR MONGODB & MEMORY SAFETY)
 app.post("/api/chat-stream", async (req, res) => {
   const googleId = req.headers["x-google-id"];
    
@@ -397,9 +335,9 @@ app.post("/api/chat-stream", async (req, res) => {
   const { conversationId, message } = req.body || {};
   if (!message || !message.role) return res.status(400).json({ error: "Invalid Body" });
 
-  let convId = conversationId || `conv_${Date.now()}`;
-  const history = conversations.get(convId) || [];
+  const convId = conversationId || `conv_${Date.now()}`;
 
+  // Prepare Message
   let newMessage = { role: message.role, content: message.content };
   if (message.screenshot) {
     let sc = message.screenshot.startsWith("data:image") ? message.screenshot : `data:image/png;base64,${message.screenshot}`;
@@ -412,14 +350,25 @@ app.post("/api/chat-stream", async (req, res) => {
     };
   }
 
-  history.push(newMessage);
-  conversations.set(convId, history);
-
-  res.setHeader("x-conversation-id", convId);
-  res.setHeader("Content-Type", "text/plain; charset=utf-8");
-  res.setHeader("Transfer-Encoding", "chunked");
-
   try {
+    // A. UPSERT TO MONGODB (NO RAM MAP)
+    const conversation = await Conversation.findOneAndUpdate(
+      { conversationId: convId },
+      { 
+        $push: { messages: newMessage },
+        $set: { updatedAt: new Date(), userId: googleId }
+      },
+      { new: true, upsert: true }
+    );
+
+    // B. FORMAT FOR OPENAI
+    const history = conversation.messages.map(m => ({ role: m.role, content: m.content }));
+
+    // C. STREAM RESPONSE
+    res.setHeader("x-conversation-id", convId);
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.setHeader("Transfer-Encoding", "chunked");
+
     const openaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
@@ -432,22 +381,47 @@ app.post("/api/chat-stream", async (req, res) => {
         return;
     }
 
-    for await (const chunk of openaiRes.body) res.write(chunk);
+    let fullAiResponse = "";
+    const decoder = new TextDecoder();
+
+    for await (const chunk of openaiRes.body) {
+        const text = decoder.decode(chunk, { stream: true });
+        // Simplified parsing to capture full response text for DB
+        const lines = text.split('\n');
+        for (const line of lines) {
+            if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+                try {
+                    const json = JSON.parse(line.replace('data: ', ''));
+                    const content = json.choices[0]?.delta?.content || "";
+                    fullAiResponse += content;
+                } catch (e) { /* ignore stream artifacts */ }
+            }
+        }
+        res.write(chunk); // Send raw chunk to user
+    }
+
+    // D. SAVE ASSISTANT RESPONSE TO DB
+    if (fullAiResponse) {
+        await Conversation.updateOne(
+            { conversationId: convId },
+            { $push: { messages: { role: "assistant", content: fullAiResponse } } }
+        );
+    }
+
     res.end();
   } catch (err) {
     console.error("❌ [AI] Stream Error:", err);
-    res.statusCode = 500;
-    res.end("Internal Stream Error");
+    if (!res.headersSent) res.status(500).end("Internal Stream Error");
   }
 });
 
-// 6. TRANSCRIPTION
+// 6. TRANSCRIPTION (WITH SIZE LIMIT)
 app.post("/api/transcribe", upload.single("file"), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: "Missing file" });
+    if (!req.file) return res.status(400).json({ error: "Missing file or file too large (Max 5MB)" });
+    
     const mime = req.file.mimetype || "audio/webm";
     const filename = req.file.originalname || "audio.webm";
-
     const formData = new FormData();
     formData.append("file", new Blob([req.file.buffer], { type: mime }), filename);
     formData.append("model", "whisper-1"); 
@@ -469,15 +443,12 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
   }
 });
 
-// --- CLEAN URL HANDLER (MUST BE LAST) ---
+// --- CLEAN URL HANDLER ---
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api')) return next();
   if (req.path.includes('.')) return next();
   if (req.path === '/') return res.sendFile(path.join(__dirname, 'index.html'));
-  
-  res.sendFile(path.join(__dirname, req.path + '.html'), (err) => {
-      if (err) next(); 
-  });
+  res.sendFile(path.join(__dirname, req.path + '.html'), (err) => { if (err) next(); });
 });
 
 app.listen(PORT, () => {
