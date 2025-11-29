@@ -17,7 +17,6 @@ const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
 const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
 
 // --- PRICING CONFIGURATION (STRICTLY FROM ENV) ---
-// [IMPORTANT]: No fallback values. Returns NaN if env is missing.
 const PRICING = {
   pro: {
     monthly: parseFloat(process.env.PRO_PER_MONTH), 
@@ -327,7 +326,6 @@ app.post("/api/payment/create-order", async (req, res) => {
         }
 
         // B. Apply Discount to Old Price (FIX: User gets credit for what they PAID, not Base)
-        // We assume the user bought the old plan with the current configured discount
         const oldDiscountAmount = (oldBasePrice * PRICING.pro.discount) / 100;
         oldPlanCredit = oldBasePrice - oldDiscountAmount;
 
@@ -338,9 +336,12 @@ app.post("/api/payment/create-order", async (req, res) => {
     // Precision Check
     if (finalAmount < 0) finalAmount = 0;
 
-    // Round to 2 decimals, convert to paise
-    finalAmount = parseFloat(finalAmount.toFixed(2));
-    const amountInPaise = Math.round(finalAmount * 100); 
+    // --- WHOLE NUMBER LOGIC (Strict Floor) ---
+    // Rounds 1999.90 -> 1999
+    finalAmount = Math.floor(finalAmount);
+    
+    // Convert to paise
+    const amountInPaise = finalAmount * 100; 
 
     console.log(`[Final] Amount to Charge: ${finalAmount}`);
 
