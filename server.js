@@ -34,7 +34,7 @@ const PRICING = {
 // --- INITIAL CHECKS ---
 console.log("--- 🚀 STARTING SERVER ---");
 console.log("--- 💰 PRICING LOADED FROM ENV ---");
-console.table(PRICING); // Check your terminal for this table!
+console.table(PRICING); 
 
 if (!OPENAI_API_KEY) console.error("⚠️  MISSING: OPENAI_API_KEY");
 if (!RAZORPAY_KEY_ID) console.error("⚠️  MISSING: RAZORPAY_KEY_ID");
