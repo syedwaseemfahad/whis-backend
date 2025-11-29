@@ -15,6 +15,7 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/whis-app";
 const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
 const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID; // Loaded from Env
 
 // --- PRICING CONFIGURATION (STRICTLY FROM ENV) ---
 const PRICING = {
@@ -32,11 +33,12 @@ const PRICING = {
 
 // --- INITIAL CHECKS ---
 console.log("--- 🚀 STARTING SERVER ---");
-console.log("--- 💰 PRICING LOADED FROM ENV ---");
+console.log("--- 💰 PRICING LOADED ---");
 console.table(PRICING); 
 
 if (!OPENAI_API_KEY) console.error("⚠️  MISSING: OPENAI_API_KEY");
 if (!RAZORPAY_KEY_ID) console.error("⚠️  MISSING: RAZORPAY_KEY_ID");
+if (!GOOGLE_CLIENT_ID) console.error("⚠️  MISSING: GOOGLE_CLIENT_ID");
 if (isNaN(PRICING.pro.monthly) || isNaN(PRICING.pro_plus.monthly)) {
     console.error("❌ CRITICAL: Pricing Environment Variables are missing or invalid!");
 }
@@ -216,9 +218,12 @@ async function checkAndIncrementUsage(googleId) {
 
 app.get("/ping", (req, res) => res.send("pong"));
 
-// 0. CONFIG ROUTE - Sends Pricing to UI
-app.get("/api/config/pricing", (req, res) => {
-    res.json(PRICING);
+// 0. CONFIG ROUTE - Sends Pricing + Client ID to UI
+app.get("/api/config", (req, res) => {
+    res.json({
+        pricing: PRICING,
+        googleClientId: GOOGLE_CLIENT_ID
+    });
 });
 
 // 1. AUTH
