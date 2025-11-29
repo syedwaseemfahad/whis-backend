@@ -17,15 +17,16 @@ const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
 const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
 
 // --- PRICING CONFIGURATION (FROM ENV) ---
+// We ensure these are floats
 const PRICING = {
   pro: {
-    monthly: parseFloat(process.env.PRO_PER_MONTH || 999),
-    annual_per_month: parseFloat(process.env.PRO_YEAR_PER_MONTH || 499),
+    monthly: parseFloat(process.env.PRO_PER_MONTH || 999.00),
+    annual_per_month: parseFloat(process.env.PRO_YEAR_PER_MONTH || 499.00),
     discount: parseFloat(process.env.PRO_DISCOUNT || 0)
   },
   pro_plus: {
-    monthly: parseFloat(process.env.PROPLUS_PER_MONTH || 2499),
-    annual_per_month: parseFloat(process.env.PROPLUS_YEAR_PER_MONTH || 999),
+    monthly: parseFloat(process.env.PROPLUS_PER_MONTH || 2499.00),
+    annual_per_month: parseFloat(process.env.PROPLUS_YEAR_PER_MONTH || 999.00),
     discount: parseFloat(process.env.PROPLUS_DISCOUNT || 0)
   }
 };
@@ -120,7 +121,6 @@ const conversationSchema = new mongoose.Schema({
   ],
   updatedAt: { type: Date, default: Date.now }
 });
-// Auto-delete conversations after 24h
 conversationSchema.index({ updatedAt: 1 }, { expireAfterSeconds: 86400 }); 
 const Conversation = mongoose.model("Conversation", conversationSchema);
 
@@ -214,10 +214,9 @@ async function checkAndIncrementUsage(googleId) {
 
 // ================= ROUTES =================
 
-// [FIX 4: PING ROUTE] - Keep server awake
 app.get("/ping", (req, res) => res.send("pong"));
 
-// 0. CONFIG ROUTE (NEW) - Sends Pricing to UI
+// 0. CONFIG ROUTE - Sends Pricing to UI
 app.get("/api/config/pricing", (req, res) => {
     res.json(PRICING);
 });
@@ -261,7 +260,6 @@ app.get("/api/user/status", async (req, res) => {
     const user = await User.findOne({ googleId });
     if (!user) return res.json({ active: false, tier: null });
 
-    // Check expiry logic...
     if (user.subscription.status === "active" && user.subscription.validUntil && new Date() > user.subscription.validUntil) {
       user.subscription.status = "inactive";
       user.subscription.tier = "free";
@@ -287,12 +285,13 @@ app.post("/api/payment/create-order", async (req, res) => {
     const user = await User.findOne({ googleId });
     if (!user) return res.status(404).json({ error: "User not found" });
 
-    // 1. Calculate Base Amount based on ENV variables
+    // --- 1. Calculate TARGET Plan Price ---
     let priceInfo;
-    let basePrice = 0;
+    let basePrice = 0.00;
     
     if (tier === "pro") {
         priceInfo = PRICING.pro;
+        // Logic: Annual price = Monthly rate * 12
         basePrice = (cycle === "annual") ? (priceInfo.annual_per_month * 12) : priceInfo.monthly;
     } else if (tier === "pro_plus") {
         priceInfo = PRICING.pro_plus;
@@ -301,35 +300,45 @@ app.post("/api/payment/create-order", async (req, res) => {
         return res.status(400).json({ error: "Invalid tier" });
     }
 
-    // 2. Apply Discount
+    // Apply Discount
     const discountAmount = (basePrice * priceInfo.discount) / 100;
     let finalAmount = basePrice - discountAmount;
 
-    // 3. Upgrade Logic: Pay the Difference
-    // If user is actively Pro and upgrading to Pro Plus
-    let upgradeCredit = 0;
-    const isUpgrade = user.subscription.status === 'active' && 
-                      user.subscription.tier === 'pro' && 
-                      tier === 'pro_plus';
+    // --- 2. Calculate UPGRADE Diff (Fixed Logic) ---
+    // Rule: Pay the difference = (New Plan Cost) - (Current Active Plan Cost)
+    let isUpgrade = false;
+    
+    if (user.subscription.status === 'active' && 
+        user.subscription.tier === 'pro' && 
+        tier === 'pro_plus') {
+        
+        isUpgrade = true;
+        
+        // Find the cost of what the user CURRENTLY has
+        // We look at the User's stored cycle, not the requested cycle
+        const oldTierData = PRICING.pro;
+        let oldPlanCost = 0.00;
+        
+        if (user.subscription.cycle === 'monthly') {
+            oldPlanCost = oldTierData.monthly;
+        } else {
+            // If they are on annual, the value of their plan is the full annual price
+            oldPlanCost = oldTierData.annual_per_month * 12;
+        }
 
-    if (isUpgrade) {
-        // We assume they are paying difference for the SAME cycle type they are selecting
-        // If they select Annual Pro Plus, we subtract Annual Pro price
-        // If they select Monthly Pro Plus, we subtract Monthly Pro price
-        const currentTierInfo = PRICING.pro; // They are currently Pro
-        const currentTierPrice = (cycle === "annual") ? (currentTierInfo.annual_per_month * 12) : currentTierInfo.monthly;
-        
-        upgradeCredit = currentTierPrice;
-        finalAmount = finalAmount - upgradeCredit;
-        
-        // Safety: Ensure amount is not negative
-        if (finalAmount < 0) finalAmount = 0; 
+        // Subtract old plan cost from new plan cost
+        finalAmount = finalAmount - oldPlanCost;
     }
 
-    // Razorpay expects amount in paise (integers)
-    const amountInPaise = Math.round(finalAmount * 100);
+    // Precision Check: Ensure finalAmount is never negative
+    if (finalAmount < 0) finalAmount = 0;
+
+    // Round to 2 decimals for precision, then convert to paise (integer)
+    // Example: 1500.55 -> 150055
+    finalAmount = parseFloat(finalAmount.toFixed(2));
+    const amountInPaise = Math.round(finalAmount * 100); 
+
     const receiptId = `rcpt_${Date.now()}`;
-    
     const options = { 
         amount: amountInPaise, 
         currency: "INR", 
@@ -340,7 +349,7 @@ app.post("/api/payment/create-order", async (req, res) => {
     const order = await razorpay.orders.create(options);
     user.orders.push({ 
         orderId: order.id, 
-        amount: finalAmount, 
+        amount: finalAmount, // Store exact float amount
         date: new Date(), 
         status: "created", 
         tier, 
@@ -384,6 +393,9 @@ app.post("/api/payment/verify", async (req, res) => {
 
       user.subscription.status = "active";
       user.subscription.tier = order?.tier || "pro";
+      // Update the user's cycle so future upgrades are calculated correctly
+      user.subscription.cycle = order?.cycle || "monthly";
+      
       const days = order?.cycle === "annual" ? 365 : 30;
       user.subscription.validUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
 
@@ -398,7 +410,7 @@ app.post("/api/payment/verify", async (req, res) => {
   }
 });
 
-// 5. STREAM CHAT (REWRITTEN FOR MONGODB & MEMORY SAFETY)
+// 5. STREAM CHAT
 app.post("/api/chat-stream", async (req, res) => {
   const googleId = req.headers["x-google-id"];
    
@@ -412,7 +424,6 @@ app.post("/api/chat-stream", async (req, res) => {
 
   const convId = conversationId || `conv_${Date.now()}`;
 
-  // Prepare Message
   let newMessage = { role: message.role, content: message.content };
   if (message.screenshot) {
     let sc = message.screenshot.startsWith("data:image") ? message.screenshot : `data:image/png;base64,${message.screenshot}`;
@@ -426,7 +437,6 @@ app.post("/api/chat-stream", async (req, res) => {
   }
 
   try {
-    // A. UPSERT TO MONGODB (NO RAM MAP)
     const conversation = await Conversation.findOneAndUpdate(
       { conversationId: convId },
       { 
@@ -436,10 +446,8 @@ app.post("/api/chat-stream", async (req, res) => {
       { new: true, upsert: true }
     );
 
-    // B. FORMAT FOR OPENAI
     const history = conversation.messages.map(m => ({ role: m.role, content: m.content }));
 
-    // C. STREAM RESPONSE
     res.setHeader("x-conversation-id", convId);
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
     res.setHeader("Transfer-Encoding", "chunked");
@@ -461,7 +469,6 @@ app.post("/api/chat-stream", async (req, res) => {
 
     for await (const chunk of openaiRes.body) {
         const text = decoder.decode(chunk, { stream: true });
-        // Simplified parsing to capture full response text for DB
         const lines = text.split('\n');
         for (const line of lines) {
             if (line.startsWith('data: ') && line !== 'data: [DONE]') {
@@ -469,13 +476,12 @@ app.post("/api/chat-stream", async (req, res) => {
                     const json = JSON.parse(line.replace('data: ', ''));
                     const content = json.choices[0]?.delta?.content || "";
                     fullAiResponse += content;
-                } catch (e) { /* ignore stream artifacts */ }
+                } catch (e) { }
             }
         }
-        res.write(chunk); // Send raw chunk to user
+        res.write(chunk); 
     }
 
-    // D. SAVE ASSISTANT RESPONSE TO DB
     if (fullAiResponse) {
         await Conversation.updateOne(
             { conversationId: convId },
@@ -490,7 +496,7 @@ app.post("/api/chat-stream", async (req, res) => {
   }
 });
 
-// 6. TRANSCRIPTION (WITH SIZE LIMIT)
+// 6. TRANSCRIPTION
 app.post("/api/transcribe", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "Missing file or file too large (Max 5MB)" });
@@ -518,7 +524,6 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
   }
 });
 
-// --- CLEAN URL HANDLER ---
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api')) return next();
   if (req.path.includes('.')) return next();
