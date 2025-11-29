@@ -16,41 +16,43 @@ const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/whis-a
 const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
 const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
 
-// --- PRICING CONFIGURATION (FROM ENV) ---
-// We ensure these are floats
+// --- PRICING CONFIGURATION (STRICTLY FROM ENV) ---
+// [IMPORTANT]: No fallback values. Returns NaN if env is missing.
 const PRICING = {
   pro: {
-    monthly: parseFloat(process.env.PRO_PER_MONTH || 999.00),
-    annual_per_month: parseFloat(process.env.PRO_YEAR_PER_MONTH || 499.00),
+    monthly: parseFloat(process.env.PRO_PER_MONTH), 
+    annual_per_month: parseFloat(process.env.PRO_YEAR_PER_MONTH),
     discount: parseFloat(process.env.PRO_DISCOUNT || 0)
   },
   pro_plus: {
-    monthly: parseFloat(process.env.PROPLUS_PER_MONTH || 2499.00),
-    annual_per_month: parseFloat(process.env.PROPLUS_YEAR_PER_MONTH || 999.00),
+    monthly: parseFloat(process.env.PROPLUS_PER_MONTH), 
+    annual_per_month: parseFloat(process.env.PROPLUS_YEAR_PER_MONTH),
     discount: parseFloat(process.env.PROPLUS_DISCOUNT || 0)
   }
 };
 
 // --- INITIAL CHECKS ---
-console.log("--- 🚀 STARTING OPTIMIZED SERVER ---");
+console.log("--- 🚀 STARTING SERVER ---");
+console.log("Pricing Loaded from ENV:", JSON.stringify(PRICING, null, 2)); // Debug Log
+
 if (!OPENAI_API_KEY) console.error("⚠️  MISSING: OPENAI_API_KEY");
 if (!RAZORPAY_KEY_ID) console.error("⚠️  MISSING: RAZORPAY_KEY_ID");
+if (isNaN(PRICING.pro.monthly)) console.error("⚠️  MISSING PRICING ENV VARIABLES");
 
 const razorpay = new Razorpay({
   key_id: RAZORPAY_KEY_ID,
   key_secret: RAZORPAY_KEY_SECRET,
 });
 
-// [FIX 1: LIMIT UPLOAD SIZE] - Prevents RAM Crash
 const upload = multer({ 
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 } // Max 5MB
+  limits: { fileSize: 5 * 1024 * 1024 } 
 });
 
 const app = express();
 app.set('trust proxy', true);
 app.use(cors());
-app.use(express.json({ limit: "50mb" })); // Keep this for screenshots in chat
+app.use(express.json({ limit: "50mb" }));
 
 // --- 1. MongoDB Connection ---
 mongoose
@@ -60,7 +62,6 @@ mongoose
 
 // --- 2. SCHEMAS ---
 
-// A. Metric Schema
 const metricSchema = new mongoose.Schema({
   date: { type: String, required: true },
   ip: { type: String, required: true },
@@ -79,7 +80,6 @@ const metricSchema = new mongoose.Schema({
 metricSchema.index({ date: 1, ip: 1 }, { unique: true });
 const Metric = mongoose.model("Metric", metricSchema);
 
-// B. User Schema
 const userSchema = new mongoose.Schema({
   googleId: { type: String, unique: true, required: true },
   email: { type: String, required: true },
@@ -108,7 +108,6 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model("User", userSchema);
 
-// C. Conversation Schema
 const conversationSchema = new mongoose.Schema({
   conversationId: { type: String, required: true, unique: true, index: true },
   userId: String,
@@ -285,13 +284,14 @@ app.post("/api/payment/create-order", async (req, res) => {
     const user = await User.findOne({ googleId });
     if (!user) return res.status(404).json({ error: "User not found" });
 
+    console.log(`[Order] User: ${googleId}, Plan: ${tier}, Cycle: ${cycle}`);
+
     // --- 1. Calculate TARGET Plan Price ---
     let priceInfo;
     let basePrice = 0.00;
     
     if (tier === "pro") {
         priceInfo = PRICING.pro;
-        // Logic: Annual price = Monthly rate * 12
         basePrice = (cycle === "annual") ? (priceInfo.annual_per_month * 12) : priceInfo.monthly;
     } else if (tier === "pro_plus") {
         priceInfo = PRICING.pro_plus;
@@ -303,9 +303,11 @@ app.post("/api/payment/create-order", async (req, res) => {
     // Apply Discount
     const discountAmount = (basePrice * priceInfo.discount) / 100;
     let finalAmount = basePrice - discountAmount;
+    
+    console.log(`[Calc] Base: ${basePrice}, Discounted: ${finalAmount}`);
 
-    // --- 2. Calculate UPGRADE Diff (Fixed Logic) ---
-    // Rule: Pay the difference = (New Plan Cost) - (Current Active Plan Cost)
+    // --- 2. Calculate UPGRADE Diff ---
+    // Rule: New Cost - Old Cost (Current Active)
     let isUpgrade = false;
     
     if (user.subscription.status === 'active' && 
@@ -314,29 +316,28 @@ app.post("/api/payment/create-order", async (req, res) => {
         
         isUpgrade = true;
         
-        // Find the cost of what the user CURRENTLY has
-        // We look at the User's stored cycle, not the requested cycle
-        const oldTierData = PRICING.pro;
+        // Find Cost of User's CURRENT active plan
+        // This relies on PRICING env vars matching what they originally paid
         let oldPlanCost = 0.00;
         
         if (user.subscription.cycle === 'monthly') {
-            oldPlanCost = oldTierData.monthly;
+            oldPlanCost = PRICING.pro.monthly;
         } else {
-            // If they are on annual, the value of their plan is the full annual price
-            oldPlanCost = oldTierData.annual_per_month * 12;
+            oldPlanCost = PRICING.pro.annual_per_month * 12;
         }
 
-        // Subtract old plan cost from new plan cost
+        console.log(`[Upgrade] Subtracting Old Cost: ${oldPlanCost}`);
         finalAmount = finalAmount - oldPlanCost;
     }
 
-    // Precision Check: Ensure finalAmount is never negative
+    // Precision Check
     if (finalAmount < 0) finalAmount = 0;
 
-    // Round to 2 decimals for precision, then convert to paise (integer)
-    // Example: 1500.55 -> 150055
+    // Round to 2 decimals, convert to paise
     finalAmount = parseFloat(finalAmount.toFixed(2));
     const amountInPaise = Math.round(finalAmount * 100); 
+
+    console.log(`[Final] Amount to Charge: ${finalAmount}`);
 
     const receiptId = `rcpt_${Date.now()}`;
     const options = { 
@@ -349,7 +350,7 @@ app.post("/api/payment/create-order", async (req, res) => {
     const order = await razorpay.orders.create(options);
     user.orders.push({ 
         orderId: order.id, 
-        amount: finalAmount, // Store exact float amount
+        amount: finalAmount, 
         date: new Date(), 
         status: "created", 
         tier, 
@@ -393,7 +394,7 @@ app.post("/api/payment/verify", async (req, res) => {
 
       user.subscription.status = "active";
       user.subscription.tier = order?.tier || "pro";
-      // Update the user's cycle so future upgrades are calculated correctly
+      // Update cycle so future upgrades are calculated correctly
       user.subscription.cycle = order?.cycle || "monthly";
       
       const days = order?.cycle === "annual" ? 365 : 30;
