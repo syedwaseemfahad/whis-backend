@@ -16,6 +16,20 @@ const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/whis-a
 const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
 const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
 
+// --- PRICING CONFIGURATION (FROM ENV) ---
+const PRICING = {
+  pro: {
+    monthly: parseFloat(process.env.PRO_PER_MONTH || 999),
+    annual_per_month: parseFloat(process.env.PRO_YEAR_PER_MONTH || 499),
+    discount: parseFloat(process.env.PRO_DISCOUNT || 0)
+  },
+  pro_plus: {
+    monthly: parseFloat(process.env.PROPLUS_PER_MONTH || 2499),
+    annual_per_month: parseFloat(process.env.PROPLUS_YEAR_PER_MONTH || 999),
+    discount: parseFloat(process.env.PROPLUS_DISCOUNT || 0)
+  }
+};
+
 // --- INITIAL CHECKS ---
 console.log("--- 🚀 STARTING OPTIMIZED SERVER ---");
 if (!OPENAI_API_KEY) console.error("⚠️  MISSING: OPENAI_API_KEY");
@@ -93,7 +107,7 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model("User", userSchema);
 
-// C. Conversation Schema [FIX 2: NEW SCHEMA FOR CHAT HISTORY]
+// C. Conversation Schema
 const conversationSchema = new mongoose.Schema({
   conversationId: { type: String, required: true, unique: true, index: true },
   userId: String,
@@ -152,7 +166,6 @@ app.use((req, res, next) => {
     
     if (googleId) updates.$set["userId"] = googleId;
 
-    // [FIX 3: REMOVED AWAIT] - Background write for speed
     Metric.findOneAndUpdate(
       { date: today, ip: ip },
       updates,
@@ -203,6 +216,11 @@ async function checkAndIncrementUsage(googleId) {
 
 // [FIX 4: PING ROUTE] - Keep server awake
 app.get("/ping", (req, res) => res.send("pong"));
+
+// 0. CONFIG ROUTE (NEW) - Sends Pricing to UI
+app.get("/api/config/pricing", (req, res) => {
+    res.json(PRICING);
+});
 
 // 1. AUTH
 app.post("/api/auth/google", async (req, res) => {
@@ -262,35 +280,92 @@ app.get("/api/user/status", async (req, res) => {
   }
 });
 
-// 3. PAYMENT ROUTES (Unchanged)
+// 3. PAYMENT ROUTES
 app.post("/api/payment/create-order", async (req, res) => {
-  // ... (Keep your existing payment code)
   try {
     const { googleId, tier, cycle } = req.body; 
     const user = await User.findOne({ googleId });
     if (!user) return res.status(404).json({ error: "User not found" });
 
-    let amount = 0;
-    if (tier === "pro") amount = (cycle === "annual") ? 5988.0 : 999.0;
-    else if (tier === "pro_plus") amount = (cycle === "annual") ? 11988.0 : 2499.0;
-    else return res.status(400).json({ error: "Invalid tier" });
+    // 1. Calculate Base Amount based on ENV variables
+    let priceInfo;
+    let basePrice = 0;
+    
+    if (tier === "pro") {
+        priceInfo = PRICING.pro;
+        basePrice = (cycle === "annual") ? (priceInfo.annual_per_month * 12) : priceInfo.monthly;
+    } else if (tier === "pro_plus") {
+        priceInfo = PRICING.pro_plus;
+        basePrice = (cycle === "annual") ? (priceInfo.annual_per_month * 12) : priceInfo.monthly;
+    } else {
+        return res.status(400).json({ error: "Invalid tier" });
+    }
 
-    const amountInPaise = Math.round(amount * 100);
+    // 2. Apply Discount
+    const discountAmount = (basePrice * priceInfo.discount) / 100;
+    let finalAmount = basePrice - discountAmount;
+
+    // 3. Upgrade Logic: Pay the Difference
+    // If user is actively Pro and upgrading to Pro Plus
+    let upgradeCredit = 0;
+    const isUpgrade = user.subscription.status === 'active' && 
+                      user.subscription.tier === 'pro' && 
+                      tier === 'pro_plus';
+
+    if (isUpgrade) {
+        // We assume they are paying difference for the SAME cycle type they are selecting
+        // If they select Annual Pro Plus, we subtract Annual Pro price
+        // If they select Monthly Pro Plus, we subtract Monthly Pro price
+        const currentTierInfo = PRICING.pro; // They are currently Pro
+        const currentTierPrice = (cycle === "annual") ? (currentTierInfo.annual_per_month * 12) : currentTierInfo.monthly;
+        
+        upgradeCredit = currentTierPrice;
+        finalAmount = finalAmount - upgradeCredit;
+        
+        // Safety: Ensure amount is not negative
+        if (finalAmount < 0) finalAmount = 0; 
+    }
+
+    // Razorpay expects amount in paise (integers)
+    const amountInPaise = Math.round(finalAmount * 100);
     const receiptId = `rcpt_${Date.now()}`;
-    const options = { amount: amountInPaise, currency: "INR", receipt: receiptId, notes: { userId: googleId, tier, cycle } };
+    
+    const options = { 
+        amount: amountInPaise, 
+        currency: "INR", 
+        receipt: receiptId, 
+        notes: { userId: googleId, tier, cycle, isUpgrade: isUpgrade } 
+    };
 
     const order = await razorpay.orders.create(options);
-    user.orders.push({ orderId: order.id, amount, date: new Date(), status: "created", tier, cycle, receipt: receiptId, currency: "INR" });
+    user.orders.push({ 
+        orderId: order.id, 
+        amount: finalAmount, 
+        date: new Date(), 
+        status: "created", 
+        tier, 
+        cycle, 
+        receipt: receiptId, 
+        currency: "INR" 
+    });
     await user.save();
 
-    res.json({ order_id: order.id, amount: amountInPaise, currency: "INR", key_id: RAZORPAY_KEY_ID, user_name: user.name, user_email: user.email, user_contact: user.phone || "" });
+    res.json({ 
+        order_id: order.id, 
+        amount: amountInPaise, 
+        currency: "INR", 
+        key_id: RAZORPAY_KEY_ID, 
+        user_name: user.name, 
+        user_email: user.email, 
+        user_contact: user.phone || "" 
+    });
   } catch (err) {
+    console.error("Payment Create Error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
 app.post("/api/payment/verify", async (req, res) => {
-  // ... (Keep your existing verify code)
   try {
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
     const body = razorpay_order_id + "|" + razorpay_payment_id;
