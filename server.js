@@ -33,11 +33,14 @@ const PRICING = {
 
 // --- INITIAL CHECKS ---
 console.log("--- 🚀 STARTING SERVER ---");
-console.log("Pricing Loaded from ENV:", JSON.stringify(PRICING, null, 2)); // Debug Log
+console.log("--- 💰 PRICING LOADED FROM ENV ---");
+console.table(PRICING); // Check your terminal for this table!
 
 if (!OPENAI_API_KEY) console.error("⚠️  MISSING: OPENAI_API_KEY");
 if (!RAZORPAY_KEY_ID) console.error("⚠️  MISSING: RAZORPAY_KEY_ID");
-if (isNaN(PRICING.pro.monthly)) console.error("⚠️  MISSING PRICING ENV VARIABLES");
+if (isNaN(PRICING.pro.monthly) || isNaN(PRICING.pro_plus.monthly)) {
+    console.error("❌ CRITICAL: Pricing Environment Variables are missing or invalid!");
+}
 
 const razorpay = new Razorpay({
   key_id: RAZORPAY_KEY_ID,
@@ -61,7 +64,6 @@ mongoose
   .catch((err) => console.error("❌ [DB] Connection Failed:", err));
 
 // --- 2. SCHEMAS ---
-
 const metricSchema = new mongoose.Schema({
   date: { type: String, required: true },
   ip: { type: String, required: true },
@@ -284,9 +286,9 @@ app.post("/api/payment/create-order", async (req, res) => {
     const user = await User.findOne({ googleId });
     if (!user) return res.status(404).json({ error: "User not found" });
 
-    console.log(`[Order] User: ${googleId}, Plan: ${tier}, Cycle: ${cycle}`);
+    console.log(`[Order] User: ${googleId} | Req Tier: ${tier} | Req Cycle: ${cycle}`);
 
-    // --- 1. Calculate TARGET Plan Price ---
+    // --- 1. Calculate TARGET Plan Price (Base) ---
     let priceInfo;
     let basePrice = 0.00;
     
@@ -300,15 +302,15 @@ app.post("/api/payment/create-order", async (req, res) => {
         return res.status(400).json({ error: "Invalid tier" });
     }
 
-    // Apply Discount
+    // --- 2. Apply Discount to Target Price ---
     const discountAmount = (basePrice * priceInfo.discount) / 100;
     let finalAmount = basePrice - discountAmount;
     
-    console.log(`[Calc] Base: ${basePrice}, Discounted: ${finalAmount}`);
+    console.log(`[Calc] Base: ${basePrice} | Discount: ${discountAmount} | Subtotal: ${finalAmount}`);
 
-    // --- 2. Calculate UPGRADE Diff ---
-    // Rule: New Cost - Old Cost (Current Active)
+    // --- 3. Calculate UPGRADE Diff (Corrected: Account for Old Plan Discount) ---
     let isUpgrade = false;
+    let oldPlanCredit = 0.00;
     
     if (user.subscription.status === 'active' && 
         user.subscription.tier === 'pro' && 
@@ -316,18 +318,21 @@ app.post("/api/payment/create-order", async (req, res) => {
         
         isUpgrade = true;
         
-        // Find Cost of User's CURRENT active plan
-        // This relies on PRICING env vars matching what they originally paid
-        let oldPlanCost = 0.00;
-        
+        // A. Determine Old Base Price (Based on User's Cycle)
+        let oldBasePrice = 0.00;
         if (user.subscription.cycle === 'monthly') {
-            oldPlanCost = PRICING.pro.monthly;
+            oldBasePrice = PRICING.pro.monthly;
         } else {
-            oldPlanCost = PRICING.pro.annual_per_month * 12;
+            oldBasePrice = PRICING.pro.annual_per_month * 12;
         }
 
-        console.log(`[Upgrade] Subtracting Old Cost: ${oldPlanCost}`);
-        finalAmount = finalAmount - oldPlanCost;
+        // B. Apply Discount to Old Price (FIX: User gets credit for what they PAID, not Base)
+        // We assume the user bought the old plan with the current configured discount
+        const oldDiscountAmount = (oldBasePrice * PRICING.pro.discount) / 100;
+        oldPlanCredit = oldBasePrice - oldDiscountAmount;
+
+        console.log(`[Upgrade] Subtracting Old Credit (Discounted): ${oldPlanCredit}`);
+        finalAmount = finalAmount - oldPlanCredit;
     }
 
     // Precision Check
@@ -344,7 +349,7 @@ app.post("/api/payment/create-order", async (req, res) => {
         amount: amountInPaise, 
         currency: "INR", 
         receipt: receiptId, 
-        notes: { userId: googleId, tier, cycle, isUpgrade: isUpgrade } 
+        notes: { userId: googleId, tier, cycle, isUpgrade: isUpgrade, oldCredit: oldPlanCredit, basePrice: basePrice } 
     };
 
     const order = await razorpay.orders.create(options);
