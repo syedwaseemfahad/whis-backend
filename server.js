@@ -15,8 +15,6 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/whis-app";
 const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
 const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
-const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || "http://localhost:42813/callback";
 
 // --- PRICING CONFIGURATION (STRICTLY FROM ENV) ---
 const PRICING = {
@@ -111,7 +109,21 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model("User", userSchema);
 
-// NOTE: Conversation schema removed. Chat is now ephemeral (session-based).
+const conversationSchema = new mongoose.Schema({
+  conversationId: { type: String, required: true, unique: true, index: true },
+  userId: String,
+  messages: [
+    {
+      role: { type: String, enum: ['user', 'assistant', 'system'] },
+      content: mongoose.Schema.Types.Mixed,
+      timestamp: { type: Date, default: Date.now }
+    }
+  ],
+  updatedAt: { type: Date, default: Date.now }
+});
+conversationSchema.index({ updatedAt: 1 }, { expireAfterSeconds: 86400 }); 
+const Conversation = mongoose.model("Conversation", conversationSchema);
+
 
 // --------- 3. SMART TRAFFIC TRACKING MIDDLEWARE ---------
 app.use((req, res, next) => {
@@ -204,12 +216,11 @@ async function checkAndIncrementUsage(googleId) {
 
 app.get("/ping", (req, res) => res.send("pong"));
 
-// 0. CONFIG ROUTE - Sends Config to Client (New)
+// 0. CONFIG ROUTE - Sends Pricing + Client ID to UI
 app.get("/api/config", (req, res) => {
     res.json({
         pricing: PRICING,
-        googleClientId: GOOGLE_CLIENT_ID,
-        googleRedirectUri: GOOGLE_REDIRECT_URI
+        googleClientId: process.env.GOOGLE_CLIENT_ID
     });
 });
 
@@ -279,6 +290,7 @@ app.post("/api/payment/create-order", async (req, res) => {
 
     console.log(`[Order] User: ${googleId} | Req Tier: ${tier} | Req Cycle: ${cycle}`);
 
+    // --- 1. Calculate TARGET Plan Price (Base) ---
     let priceInfo;
     let basePrice = 0.00;
     
@@ -292,23 +304,49 @@ app.post("/api/payment/create-order", async (req, res) => {
         return res.status(400).json({ error: "Invalid tier" });
     }
 
+    // --- 2. Apply Discount to Target Price ---
     const discountAmount = (basePrice * priceInfo.discount) / 100;
     let finalAmount = basePrice - discountAmount;
     
+    console.log(`[Calc] Base: ${basePrice} | Discount: ${discountAmount} | Subtotal: ${finalAmount}`);
+
+    // --- 3. Calculate UPGRADE Diff (Corrected: Account for Old Plan Discount) ---
     let isUpgrade = false;
     let oldPlanCredit = 0.00;
     
-    if (user.subscription.status === 'active' && user.subscription.tier === 'pro' && tier === 'pro_plus') {
+    if (user.subscription.status === 'active' && 
+        user.subscription.tier === 'pro' && 
+        tier === 'pro_plus') {
+        
         isUpgrade = true;
-        let oldBasePrice = (user.subscription.cycle === 'monthly') ? PRICING.pro.monthly : (PRICING.pro.annual_per_month * 12);
+        
+        // A. Determine Old Base Price (Based on User's Cycle)
+        let oldBasePrice = 0.00;
+        if (user.subscription.cycle === 'monthly') {
+            oldBasePrice = PRICING.pro.monthly;
+        } else {
+            oldBasePrice = PRICING.pro.annual_per_month * 12;
+        }
+
+        // B. Apply Discount to Old Price (FIX: User gets credit for what they PAID, not Base)
         const oldDiscountAmount = (oldBasePrice * PRICING.pro.discount) / 100;
         oldPlanCredit = oldBasePrice - oldDiscountAmount;
+
+        console.log(`[Upgrade] Subtracting Old Credit (Discounted): ${oldPlanCredit}`);
         finalAmount = finalAmount - oldPlanCredit;
     }
 
+    // Precision Check
     if (finalAmount < 0) finalAmount = 0;
+
+    // --- WHOLE NUMBER LOGIC (Strict Floor) ---
+    // Rounds 1999.90 -> 1999
     finalAmount = Math.floor(finalAmount);
+    
+    // Convert to paise
     const amountInPaise = finalAmount * 100; 
+
+    console.log(`[Final] Amount to Charge: ${finalAmount}`);
 
     const receiptId = `rcpt_${Date.now()}`;
     const options = { 
@@ -365,6 +403,7 @@ app.post("/api/payment/verify", async (req, res) => {
 
       user.subscription.status = "active";
       user.subscription.tier = order?.tier || "pro";
+      // Update cycle so future upgrades are calculated correctly
       user.subscription.cycle = order?.cycle || "monthly";
       
       const days = order?.cycle === "annual" ? 365 : 30;
@@ -381,7 +420,7 @@ app.post("/api/payment/verify", async (req, res) => {
   }
 });
 
-// 5. STREAM CHAT (Updated: Receives history from client, no DB storage)
+// 5. STREAM CHAT
 app.post("/api/chat-stream", async (req, res) => {
   const googleId = req.headers["x-google-id"];
    
@@ -390,39 +429,43 @@ app.post("/api/chat-stream", async (req, res) => {
     if (!check.allowed) return res.status(403).json({ error: "Limit reached" });
   }
 
-  const { message, history } = req.body || {};
+  const { conversationId, message } = req.body || {};
   if (!message || !message.role) return res.status(400).json({ error: "Invalid Body" });
 
-  let apiMessages = [];
+  const convId = conversationId || `conv_${Date.now()}`;
 
-  // Build context from client history
-  if (Array.isArray(history)) {
-      apiMessages = history.map(m => ({
-          role: m.role,
-          content: m.content
-      }));
-  }
-
-  // Add current message
-  let newMessageContent = message.content;
+  let newMessage = { role: message.role, content: message.content };
   if (message.screenshot) {
     let sc = message.screenshot.startsWith("data:image") ? message.screenshot : `data:image/png;base64,${message.screenshot}`;
-    newMessageContent = [
-        { type: "text", text: message.content || "Analyze this." },
-        { type: "image_url", image_url: { url: sc } }
-    ];
+    newMessage = { 
+        role: message.role, 
+        content: [
+            { type: "text", text: message.content || "Analyze screenshot." },
+            { type: "image_url", image_url: { url: sc } }
+        ]
+    };
   }
 
-  apiMessages.push({ role: message.role, content: newMessageContent });
-
-  res.setHeader("Content-Type", "text/plain; charset=utf-8");
-  res.setHeader("Transfer-Encoding", "chunked");
-
   try {
+    const conversation = await Conversation.findOneAndUpdate(
+      { conversationId: convId },
+      { 
+        $push: { messages: newMessage },
+        $set: { updatedAt: new Date(), userId: googleId }
+      },
+      { new: true, upsert: true }
+    );
+
+    const history = conversation.messages.map(m => ({ role: m.role, content: m.content }));
+
+    res.setHeader("x-conversation-id", convId);
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.setHeader("Transfer-Encoding", "chunked");
+
     const openaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model: "gpt-4o-mini", messages: apiMessages, temperature: 0.6, stream: true })
+      body: JSON.stringify({ model: "gpt-4o-mini", messages: history, temperature: 0.6, stream: true })
     });
 
     if (!openaiRes.ok) {
@@ -431,10 +474,29 @@ app.post("/api/chat-stream", async (req, res) => {
         return;
     }
 
+    let fullAiResponse = "";
     const decoder = new TextDecoder();
+
     for await (const chunk of openaiRes.body) {
-        // Stream raw chunks to client
-        res.write(chunk);
+        const text = decoder.decode(chunk, { stream: true });
+        const lines = text.split('\n');
+        for (const line of lines) {
+            if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+                try {
+                    const json = JSON.parse(line.replace('data: ', ''));
+                    const content = json.choices[0]?.delta?.content || "";
+                    fullAiResponse += content;
+                } catch (e) { }
+            }
+        }
+        res.write(chunk); 
+    }
+
+    if (fullAiResponse) {
+        await Conversation.updateOne(
+            { conversationId: convId },
+            { $push: { messages: { role: "assistant", content: fullAiResponse } } }
+        );
     }
 
     res.end();
