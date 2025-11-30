@@ -15,25 +15,33 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/whis-app";
 const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
 const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || "http://localhost:42813/callback";
 
-// --- PRICING CONFIGURATION (Loaded from Env) ---
+// --- PRICING CONFIGURATION (STRICTLY FROM ENV) ---
 const PRICING = {
   pro: {
-    monthly: parseFloat(process.env.PRO_PER_MONTH || 0), 
-    annual_per_month: parseFloat(process.env.PRO_YEAR_PER_MONTH || 0),
+    monthly: parseFloat(process.env.PRO_PER_MONTH), 
+    annual_per_month: parseFloat(process.env.PRO_YEAR_PER_MONTH),
     discount: parseFloat(process.env.PRO_DISCOUNT || 0)
   },
   pro_plus: {
-    monthly: parseFloat(process.env.PROPLUS_PER_MONTH || 0), 
-    annual_per_month: parseFloat(process.env.PROPLUS_YEAR_PER_MONTH || 0),
+    monthly: parseFloat(process.env.PROPLUS_PER_MONTH), 
+    annual_per_month: parseFloat(process.env.PROPLUS_YEAR_PER_MONTH),
     discount: parseFloat(process.env.PROPLUS_DISCOUNT || 0)
   }
 };
 
 // --- INITIAL CHECKS ---
 console.log("--- 🚀 STARTING SERVER ---");
+console.log("--- 💰 PRICING LOADED ---");
+console.table(PRICING); 
+
 if (!OPENAI_API_KEY) console.error("⚠️  MISSING: OPENAI_API_KEY");
 if (!RAZORPAY_KEY_ID) console.error("⚠️  MISSING: RAZORPAY_KEY_ID");
+if (isNaN(PRICING.pro.monthly) || isNaN(PRICING.pro_plus.monthly)) {
+    console.error("❌ CRITICAL: Pricing Environment Variables are missing or invalid!");
+}
 
 const razorpay = new Razorpay({
   key_id: RAZORPAY_KEY_ID,
@@ -42,7 +50,7 @@ const razorpay = new Razorpay({
 
 const upload = multer({ 
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 } // Increased limit slightly for system audio
+  limits: { fileSize: 5 * 1024 * 1024 } 
 });
 
 const app = express();
@@ -103,9 +111,9 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model("User", userSchema);
 
-// NOTE: Conversation persistence removed as requested.
+// NOTE: Conversation schema removed. Chat is now ephemeral (session-based).
 
-// --------- 3. TRAFFIC TRACKING MIDDLEWARE ---------
+// --------- 3. SMART TRAFFIC TRACKING MIDDLEWARE ---------
 app.use((req, res, next) => {
   const isStatic = req.path.match(/\.(css|js|png|jpg|jpeg|ico|svg|woff|woff2)$/);
   if (!isStatic) console.log(`📥 [REQ] ${req.method} ${req.path}`);
@@ -114,17 +122,51 @@ app.use((req, res, next) => {
   try {
     const today = new Date().toISOString().slice(0, 10);
     const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
+    const ua = req.get('User-Agent') || "";
+    const referrerHeader = req.get('Referrer') || req.get('Referer');
+    const googleId = req.headers["x-google-id"] || req.body.googleId;
+
+    let os = "Unknown";
+    let isMobile = /mobile|android|iphone|ipad|phone/i.test(ua);
+    if (/windows/i.test(ua)) os = "Windows";
+    else if (/macintosh|mac os/i.test(ua)) os = "Mac";
+    else if (/linux/i.test(ua)) os = "Linux";
+    else if (/android/i.test(ua)) os = "Android";
+    else if (/ios|iphone|ipad/i.test(ua)) os = "iOS";
+
+    let referrerDomain = null;
+    if (referrerHeader) {
+        try { referrerDomain = new URL(referrerHeader).hostname; } catch (e) {}
+    }
+
+    const updates = { 
+        $inc: { hits: 1 }, 
+        $set: { lastActive: new Date(), os: os, isMobile: isMobile },
+        $addToSet: {} 
+    };
+
+    if (req.path.includes("/chat-stream")) updates.$inc["stats.chat"] = 1;
+    else if (req.path.includes("/transcribe")) updates.$inc["stats.transcribe"] = 1;
+    else if (req.path.includes("/payment")) updates.$inc["stats.payment"] = 1;
+
+    if (referrerDomain) updates.$addToSet["referrers"] = referrerDomain;
+    else delete updates.$addToSet;
     
-    // Non-blocking metric update
+    if (googleId) updates.$set["userId"] = googleId;
+
     Metric.findOneAndUpdate(
       { date: today, ip: ip },
-      { $inc: { hits: 1 }, $set: { lastActive: new Date() } },
+      updates,
       { upsert: true, new: true }
-    ).catch(() => {});
-  } catch (error) {}
+    ).catch(err => console.error("⚠️ Analytics Write Error:", err.message));
+
+  } catch (error) {
+    console.error("⚠️ Analytics Logic Error:", error.message);
+  }
   next();
 });
 
+// Serve Static Files
 app.use(express.static(__dirname));
 
 // --- HELPER: Usage Check ---
@@ -162,26 +204,27 @@ async function checkAndIncrementUsage(googleId) {
 
 app.get("/ping", (req, res) => res.send("pong"));
 
-// 0. CONFIG ROUTE - New! Sends Pricing + Client ID to UI so UI needs no .env
+// 0. CONFIG ROUTE - Sends Config to Client (New)
 app.get("/api/config", (req, res) => {
     res.json({
         pricing: PRICING,
-        googleClientId: process.env.GOOGLE_CLIENT_ID
+        googleClientId: GOOGLE_CLIENT_ID,
+        googleRedirectUri: GOOGLE_REDIRECT_URI
     });
 });
 
 // 1. AUTH
 app.post("/api/auth/google", async (req, res) => {
   try {
-    // We expect the electron main process to send the full profile and tokens
-    const { user: userInput, tokens } = req.body; 
-    
-    if (!userInput || !userInput.id) return res.status(400).json({ error: "Invalid User Data" });
+    const { token, tokens } = req.body;
+    const idToken = token || (tokens && tokens.id_token);
+    if (!idToken) return res.status(400).json({ error: "Missing ID Token" });
 
-    const googleId = userInput.id;
-    const email = userInput.email;
-    const name = userInput.name;
-    const avatarUrl = userInput.picture;
+    const googleRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${idToken}`);
+    if (!googleRes.ok) return res.status(401).json({ error: "Invalid Google Token" });
+
+    const payload = await googleRes.json();
+    const { sub: googleId, email, name, picture: avatarUrl } = payload;
 
     const user = await User.findOneAndUpdate(
       { googleId },
@@ -196,7 +239,6 @@ app.post("/api/auth/google", async (req, res) => {
     );
     res.json({ success: true, user });
   } catch (err) {
-    console.error("Auth DB Error:", err);
     res.status(500).json({ error: "Database error" });
   }
 });
@@ -235,18 +277,24 @@ app.post("/api/payment/create-order", async (req, res) => {
     const user = await User.findOne({ googleId });
     if (!user) return res.status(404).json({ error: "User not found" });
 
+    console.log(`[Order] User: ${googleId} | Req Tier: ${tier} | Req Cycle: ${cycle}`);
+
     let priceInfo;
     let basePrice = 0.00;
     
-    if (tier === "pro") priceInfo = PRICING.pro;
-    else if (tier === "pro_plus") priceInfo = PRICING.pro_plus;
-    else return res.status(400).json({ error: "Invalid tier" });
+    if (tier === "pro") {
+        priceInfo = PRICING.pro;
+        basePrice = (cycle === "annual") ? (priceInfo.annual_per_month * 12) : priceInfo.monthly;
+    } else if (tier === "pro_plus") {
+        priceInfo = PRICING.pro_plus;
+        basePrice = (cycle === "annual") ? (priceInfo.annual_per_month * 12) : priceInfo.monthly;
+    } else {
+        return res.status(400).json({ error: "Invalid tier" });
+    }
 
-    basePrice = (cycle === "annual") ? (priceInfo.annual_per_month * 12) : priceInfo.monthly;
     const discountAmount = (basePrice * priceInfo.discount) / 100;
     let finalAmount = basePrice - discountAmount;
     
-    // Upgrade Logic
     let isUpgrade = false;
     let oldPlanCredit = 0.00;
     
@@ -259,25 +307,37 @@ app.post("/api/payment/create-order", async (req, res) => {
     }
 
     if (finalAmount < 0) finalAmount = 0;
-    finalAmount = Math.floor(finalAmount); 
+    finalAmount = Math.floor(finalAmount);
     const amountInPaise = finalAmount * 100; 
 
     const receiptId = `rcpt_${Date.now()}`;
     const options = { 
-        amount: amountInPaise, currency: "INR", receipt: receiptId, 
-        notes: { userId: googleId, tier, cycle } 
+        amount: amountInPaise, 
+        currency: "INR", 
+        receipt: receiptId, 
+        notes: { userId: googleId, tier, cycle, isUpgrade: isUpgrade, oldCredit: oldPlanCredit, basePrice: basePrice } 
     };
 
     const order = await razorpay.orders.create(options);
     user.orders.push({ 
-        orderId: order.id, amount: finalAmount, date: new Date(), 
-        status: "created", tier, cycle, receipt: receiptId, currency: "INR" 
+        orderId: order.id, 
+        amount: finalAmount, 
+        date: new Date(), 
+        status: "created", 
+        tier, 
+        cycle, 
+        receipt: receiptId, 
+        currency: "INR" 
     });
     await user.save();
 
     res.json({ 
-        order_id: order.id, amount: amountInPaise, currency: "INR", 
-        key_id: RAZORPAY_KEY_ID, user_name: user.name, user_email: user.email, 
+        order_id: order.id, 
+        amount: amountInPaise, 
+        currency: "INR", 
+        key_id: RAZORPAY_KEY_ID, 
+        user_name: user.name, 
+        user_email: user.email, 
         user_contact: user.phone || "" 
     });
   } catch (err) {
@@ -321,7 +381,7 @@ app.post("/api/payment/verify", async (req, res) => {
   }
 });
 
-// 5. STREAM CHAT (Stateless)
+// 5. STREAM CHAT (Updated: Receives history from client, no DB storage)
 app.post("/api/chat-stream", async (req, res) => {
   const googleId = req.headers["x-google-id"];
    
@@ -330,41 +390,39 @@ app.post("/api/chat-stream", async (req, res) => {
     if (!check.allowed) return res.status(403).json({ error: "Limit reached" });
   }
 
-  const { conversationId, message } = req.body || {};
+  const { message, history } = req.body || {};
   if (!message || !message.role) return res.status(400).json({ error: "Invalid Body" });
 
-  const convId = conversationId || `conv_${Date.now()}`;
+  let apiMessages = [];
 
-  // Stateless Context Construction
-  let openAiMessages = [];
-  
-  // Format message content (text + optional image)
-  let contentPayload = message.content;
+  // Build context from client history
+  if (Array.isArray(history)) {
+      apiMessages = history.map(m => ({
+          role: m.role,
+          content: m.content
+      }));
+  }
+
+  // Add current message
+  let newMessageContent = message.content;
   if (message.screenshot) {
     let sc = message.screenshot.startsWith("data:image") ? message.screenshot : `data:image/png;base64,${message.screenshot}`;
-    contentPayload = [
+    newMessageContent = [
         { type: "text", text: message.content || "Analyze this." },
         { type: "image_url", image_url: { url: sc } }
     ];
   }
-  
-  openAiMessages.push({ role: message.role, content: contentPayload });
 
-  // System Prompt for Context
-  openAiMessages.unshift({ 
-      role: "system", 
-      content: "You are Whis, a helpful assistant overlay. Be concise, direct, and helpful. You are helping the user during a live call or meeting." 
-  });
+  apiMessages.push({ role: message.role, content: newMessageContent });
+
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.setHeader("Transfer-Encoding", "chunked");
 
   try {
-    res.setHeader("x-conversation-id", convId);
-    res.setHeader("Content-Type", "text/plain; charset=utf-8");
-    res.setHeader("Transfer-Encoding", "chunked");
-
     const openaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model: "gpt-4o-mini", messages: openAiMessages, temperature: 0.6, stream: true })
+      body: JSON.stringify({ model: "gpt-4o-mini", messages: apiMessages, temperature: 0.6, stream: true })
     });
 
     if (!openaiRes.ok) {
@@ -375,19 +433,10 @@ app.post("/api/chat-stream", async (req, res) => {
 
     const decoder = new TextDecoder();
     for await (const chunk of openaiRes.body) {
-        const text = decoder.decode(chunk, { stream: true });
-        const lines = text.split('\n');
-        for (const line of lines) {
-            if (line.startsWith('data: ') && line !== 'data: [DONE]') {
-                try {
-                    const json = JSON.parse(line.replace('data: ', ''));
-                    const content = json.choices[0]?.delta?.content || "";
-                    if (content) res.write(`data: ${JSON.stringify({choices:[{delta:{content:content}}]})}\n\n`);
-                } catch (e) { }
-            }
-        }
+        // Stream raw chunks to client
+        res.write(chunk);
     }
-    res.write("data: [DONE]\n\n");
+
     res.end();
   } catch (err) {
     console.error("❌ [AI] Stream Error:", err);
@@ -398,12 +447,10 @@ app.post("/api/chat-stream", async (req, res) => {
 // 6. TRANSCRIPTION
 app.post("/api/transcribe", upload.single("file"), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: "Missing file" });
+    if (!req.file) return res.status(400).json({ error: "Missing file or file too large (Max 5MB)" });
     
-    // Check mime type, default to webm if missing (typical for electron media recorder)
-    const mime = req.file.mimetype || "audio/wav";
-    const filename = req.file.originalname || "audio.wav";
-    
+    const mime = req.file.mimetype || "audio/webm";
+    const filename = req.file.originalname || "audio.webm";
     const formData = new FormData();
     formData.append("file", new Blob([req.file.buffer], { type: mime }), filename);
     formData.append("model", "whisper-1"); 
@@ -425,10 +472,11 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
   }
 });
 
-// Fallback for SPA/Electron routing
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api')) return next();
-  res.sendFile(path.join(__dirname, 'index.html'));
+  if (req.path.includes('.')) return next();
+  if (req.path === '/') return res.sendFile(path.join(__dirname, 'index.html'));
+  res.sendFile(path.join(__dirname, req.path + '.html'), (err) => { if (err) next(); });
 });
 
 app.listen(PORT, () => {
