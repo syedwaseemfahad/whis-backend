@@ -16,11 +16,12 @@ const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/whis-a
 const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
 const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
 
-// New Configs for Electron
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID; 
+// Client Configuration (Publicly shareable via API)
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET; // Server-side only!
 const WEBSITE_PRICING_URL = process.env.WEBSITE_PRICING_URL || "http://localhost:8000/pricing.html";
 
-// --- PRICING CONFIGURATION (STRICTLY FROM ENV) ---
+// --- PRICING CONFIGURATION ---
 const PRICING = {
   pro: {
     monthly: parseFloat(process.env.PRO_PER_MONTH || 1999), 
@@ -36,16 +37,9 @@ const PRICING = {
 
 // --- INITIAL CHECKS ---
 console.log("--- 🚀 STARTING SERVER ---");
-console.log("--- 💰 PRICING LOADED ---");
-console.table(PRICING); 
-
 if (!OPENAI_API_KEY) console.error("⚠️  MISSING: OPENAI_API_KEY");
-if (!RAZORPAY_KEY_ID) console.error("⚠️  MISSING: RAZORPAY_KEY_ID");
-if (!GOOGLE_CLIENT_ID) console.error("⚠️  MISSING: GOOGLE_CLIENT_ID (Required for Client Config)");
-
-if (isNaN(PRICING.pro.monthly) || isNaN(PRICING.pro_plus.monthly)) {
-    console.error("❌ CRITICAL: Pricing Environment Variables are missing or invalid!");
-}
+if (!GOOGLE_CLIENT_ID) console.error("⚠️  MISSING: GOOGLE_CLIENT_ID");
+if (!GOOGLE_CLIENT_SECRET) console.error("⚠️  MISSING: GOOGLE_CLIENT_SECRET");
 
 const razorpay = new Razorpay({
   key_id: RAZORPAY_KEY_ID,
@@ -54,17 +48,16 @@ const razorpay = new Razorpay({
 
 const upload = multer({ 
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 } // Increased to 10MB for audio/images
+  limits: { fileSize: 10 * 1024 * 1024 } 
 });
 
 const app = express();
 app.set('trust proxy', true);
 app.use(cors());
-app.use(express.json({ limit: "50mb" })); // Increased for Base64 Screenshots
+app.use(express.json({ limit: "50mb" })); 
 
 // --- 1. MongoDB Connection ---
-mongoose
-  .connect(MONGODB_URI)
+mongoose.connect(MONGODB_URI)
   .then(() => console.log("✅ [DB] Connected to MongoDB"))
   .catch((err) => console.error("❌ [DB] Connection Failed:", err));
 
@@ -76,11 +69,7 @@ const metricSchema = new mongoose.Schema({
   referrers: [String],
   os: String,
   isMobile: Boolean,
-  stats: {
-    chat: { type: Number, default: 0 },
-    transcribe: { type: Number, default: 0 },
-    payment: { type: Number, default: 0 }
-  },
+  stats: { chat: { type: Number, default: 0 }, transcribe: { type: Number, default: 0 }, payment: { type: Number, default: 0 } },
   userId: String,
   lastActive: { type: Date, default: Date.now }
 });
@@ -99,17 +88,8 @@ const userSchema = new mongoose.Schema({
     cycle: { type: String, enum: ["monthly", "annual"], default: "monthly" },
     validUntil: Date
   },
-  freeUsage: {
-    count: { type: Number, default: 0 },
-    lastDate: { type: String }
-  },
-  orders: [
-    {
-      orderId: String, paymentId: String, signature: String, amount: Number,
-      currency: String, date: Date, status: String, tier: String, 
-      cycle: String, method: String, receipt: String, notes: Object
-    }
-  ],
+  freeUsage: { count: { type: Number, default: 0 }, lastDate: { type: String } },
+  orders: [ { orderId: String, paymentId: String, signature: String, amount: Number, currency: String, date: Date, status: String, tier: String, cycle: String, method: String, receipt: String } ],
   createdAt: { type: Date, default: Date.now },
   lastLogin: Date
 });
@@ -118,20 +98,13 @@ const User = mongoose.model("User", userSchema);
 const conversationSchema = new mongoose.Schema({
   conversationId: { type: String, required: true, unique: true, index: true },
   userId: String,
-  messages: [
-    {
-      role: { type: String, enum: ['user', 'assistant', 'system'] },
-      content: mongoose.Schema.Types.Mixed,
-      timestamp: { type: Date, default: Date.now }
-    }
-  ],
+  messages: [ { role: { type: String }, content: mongoose.Schema.Types.Mixed, timestamp: { type: Date, default: Date.now } } ],
   updatedAt: { type: Date, default: Date.now }
 });
 conversationSchema.index({ updatedAt: 1 }, { expireAfterSeconds: 86400 }); 
 const Conversation = mongoose.model("Conversation", conversationSchema);
 
-
-// --------- 3. SMART TRAFFIC TRACKING MIDDLEWARE (Restored Full Logic) ---------
+// --------- 3. MIDDLEWARE ---------
 app.use((req, res, next) => {
   const isStatic = req.path.match(/\.(css|js|png|jpg|jpeg|ico|svg|woff|woff2)$/);
   if (!isStatic) console.log(`📥 [REQ] ${req.method} ${req.path}`);
@@ -141,264 +114,138 @@ app.use((req, res, next) => {
     const today = new Date().toISOString().slice(0, 10);
     const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
     const ua = req.get('User-Agent') || "";
-    const referrerHeader = req.get('Referrer') || req.get('Referer');
     const googleId = req.headers["x-google-id"] || req.body.googleId;
-
-    let os = "Unknown";
-    let isMobile = /mobile|android|iphone|ipad|phone/i.test(ua);
-    if (/windows/i.test(ua)) os = "Windows";
-    else if (/macintosh|mac os/i.test(ua)) os = "Mac";
-    else if (/linux/i.test(ua)) os = "Linux";
-    else if (/android/i.test(ua)) os = "Android";
-    else if (/ios|iphone|ipad/i.test(ua)) os = "iOS";
-
-    let referrerDomain = null;
-    if (referrerHeader) {
-        try { referrerDomain = new URL(referrerHeader).hostname; } catch (e) {}
-    }
-
-    const updates = { 
-        $inc: { hits: 1 }, 
-        $set: { lastActive: new Date(), os: os, isMobile: isMobile },
-        $addToSet: {} 
-    };
-
-    if (req.path.includes("/chat-stream")) updates.$inc["stats.chat"] = 1;
-    else if (req.path.includes("/transcribe")) updates.$inc["stats.transcribe"] = 1;
-    else if (req.path.includes("/payment")) updates.$inc["stats.payment"] = 1;
-
-    if (referrerDomain) updates.$addToSet["referrers"] = referrerDomain;
-    else delete updates.$addToSet;
     
+    // Simple updates
+    const updates = { $inc: { hits: 1 }, $set: { lastActive: new Date() } };
     if (googleId) updates.$set["userId"] = googleId;
 
-    Metric.findOneAndUpdate(
-      { date: today, ip: ip },
-      updates,
-      { upsert: true, new: true }
-    ).catch(err => console.error("⚠️ Analytics Write Error:", err.message));
-
-  } catch (error) {
-    console.error("⚠️ Analytics Logic Error:", error.message);
-  }
+    Metric.findOneAndUpdate({ date: today, ip: ip }, updates, { upsert: true, new: true }).catch(() => {});
+  } catch (e) {}
   next();
 });
-
-// Serve Static Files (Restored)
-app.use(express.static(__dirname));
 
 // --- HELPER: Usage Check ---
 async function checkAndIncrementUsage(googleId) {
   const today = new Date().toISOString().slice(0, 10);
   const user = await User.findOne({ googleId });
-   
   if (!user) return { allowed: false, error: "User not found" };
 
   if (user.subscription.status === 'active' && ['pro', 'pro_plus'].includes(user.subscription.tier)) {
      if (user.subscription.validUntil && new Date() > user.subscription.validUntil) {
-         user.subscription.status = 'inactive';
-         user.subscription.tier = 'free';
+         user.subscription.status = 'inactive'; user.subscription.tier = 'free';
          await user.save();
      } else {
          return { allowed: true, tier: user.subscription.tier };
      }
   }
 
-  if (user.freeUsage.lastDate !== today) {
-    user.freeUsage.count = 0;
-    user.freeUsage.lastDate = today;
-  }
-
-  if (user.freeUsage.count >= 10) {
-    return { allowed: false, error: "Daily limit reached" };
-  }
+  if (user.freeUsage.lastDate !== today) { user.freeUsage.count = 0; user.freeUsage.lastDate = today; }
+  if (user.freeUsage.count >= 10) return { allowed: false, error: "Daily limit reached" };
 
   user.freeUsage.count += 1;
   await user.save();
-  return { allowed: true, tier: 'free', remaining: 10 - user.freeUsage.count };
+  return { allowed: true, tier: 'free' };
 }
 
 // ================= ROUTES =================
 
 app.get("/ping", (req, res) => res.send("pong"));
 
-// 0. NEW: CONFIG ROUTE (Requirement 9)
-// Allows Electron to fetch ClientID and Pricing URL dynamically
+// CONFIG ROUTE (Requirement: App fetches ID/Pricing from here)
 app.get("/api/config", (req, res) => {
-    res.json({
-        googleClientId: GOOGLE_CLIENT_ID,
-        pricingUrl: WEBSITE_PRICING_URL
-    });
+    res.json({ googleClientId: GOOGLE_CLIENT_ID, pricingUrl: WEBSITE_PRICING_URL });
 });
 
-// 1. AUTH
+// AUTH ROUTE (Secure Code Exchange)
 app.post("/api/auth/google", async (req, res) => {
   try {
-    const { token, tokens, user: rawUser } = req.body;
-    
-    // Support both Token ID verification OR simple profile sync (since Electron did the auth)
-    const userData = rawUser || {};
-    // If no user object, we would typically decode the 'token' here.
-    // For this implementation, we accept the profile passed from Electron.
-    
-    const googleId = userData.id || (tokens && tokens.id_token ? "extracted_from_token" : null);
-    if (!googleId && !token) return res.status(400).json({ error: "No user data provided" });
+    const { code, redirect_uri } = req.body;
+    let userData;
 
-    // Use ID from profile if available
-    const finalGoogleId = userData.id; 
-    if (!finalGoogleId) return res.json({ success: false, message: "Sync requires user ID" });
+    if (code) {
+        // Exchange Code for Token using Secret
+        const params = new URLSearchParams();
+        params.append("code", code);
+        params.append("client_id", GOOGLE_CLIENT_ID);
+        params.append("client_secret", GOOGLE_CLIENT_SECRET);
+        params.append("redirect_uri", redirect_uri);
+        params.append("grant_type", "authorization_code");
 
+        const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+            method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: params
+        });
+        if(!tokenRes.ok) return res.status(401).json({ error: "Token Exchange Failed" });
+        const tokens = await tokenRes.json();
+
+        // Get Profile
+        const profileRes = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
+            headers: { Authorization: `Bearer ${tokens.access_token}` }
+        });
+        userData = await profileRes.json();
+    } else {
+        return res.status(400).json({ error: "Missing code" });
+    }
+
+    // Upsert User
     const user = await User.findOneAndUpdate(
-      { googleId: finalGoogleId },
+      { googleId: userData.id },
       {
-        email: userData.email, 
-        name: userData.name, 
-        avatarUrl: userData.picture, 
-        lastLogin: new Date(),
-        $setOnInsert: {
-          "subscription.status": "inactive", "subscription.tier": "free",
-          "freeUsage.count": 0, "freeUsage.lastDate": new Date().toISOString().slice(0, 10)
-        }
+        email: userData.email, name: userData.name, avatarUrl: userData.picture, lastLogin: new Date(),
+        $setOnInsert: { "subscription.status": "inactive", "subscription.tier": "free", "freeUsage.count": 0, "freeUsage.lastDate": new Date().toISOString().slice(0, 10) }
       },
       { new: true, upsert: true }
     );
     res.json({ success: true, user });
+
   } catch (err) {
     console.error("Auth Error:", err);
-    res.status(500).json({ error: "Database error" });
+    res.status(500).json({ error: "Internal Error" });
   }
 });
 
-// 2. USER STATUS
 app.get("/api/user/status", async (req, res) => {
   try {
     const googleId = req.headers["x-google-id"];
-    if (!googleId) return res.status(401).json({ error: "Not authenticated" });
-
     const user = await User.findOne({ googleId });
-    if (!user) return res.json({ active: false, tier: null });
-
-    if (user.subscription.status === "active" && user.subscription.validUntil && new Date() > user.subscription.validUntil) {
-      user.subscription.status = "inactive";
-      user.subscription.tier = "free";
-      await user.save();
-    }
-
+    if (!user) return res.json({ active: false });
     res.json({
       active: user.subscription.status === "active",
       tier: user.subscription.tier,
       validUntil: user.subscription.validUntil,
-      freeUsage: user.freeUsage,
-      orders: user.orders ? user.orders.sort((a,b) => new Date(b.date) - new Date(a.date)) : []
+      freeUsage: user.freeUsage
     });
-  } catch (err) {
-    res.status(500).json({ error: "Failed to check status" });
-  }
+  } catch (err) { res.status(500).json({ error: "Error" }); }
 });
 
-// 3. PAYMENT ROUTES - CREATE ORDER (Restored Full Calculation Logic)
+// PAYMENT - CREATE ORDER
 app.post("/api/payment/create-order", async (req, res) => {
   try {
     const { googleId, tier, cycle } = req.body; 
     const user = await User.findOne({ googleId });
     if (!user) return res.status(404).json({ error: "User not found" });
 
-    console.log(`[Order] User: ${googleId} | Req Tier: ${tier} | Req Cycle: ${cycle}`);
+    // Calculate Price
+    const priceInfo = PRICING[tier];
+    if(!priceInfo) return res.status(400).json({ error: "Invalid tier" });
 
-    // --- 1. Calculate TARGET Plan Price (Base) ---
-    let priceInfo;
-    let basePrice = 0.00;
+    let basePrice = cycle === "annual" ? (priceInfo.annual_per_month * 12) : priceInfo.monthly;
+    let finalAmount = basePrice - ((basePrice * priceInfo.discount) / 100);
     
-    if (tier === "pro") {
-        priceInfo = PRICING.pro;
-        basePrice = (cycle === "annual") ? (priceInfo.annual_per_month * 12) : priceInfo.monthly;
-    } else if (tier === "pro_plus") {
-        priceInfo = PRICING.pro_plus;
-        basePrice = (cycle === "annual") ? (priceInfo.annual_per_month * 12) : priceInfo.monthly;
-    } else {
-        return res.status(400).json({ error: "Invalid tier" });
-    }
-
-    // --- 2. Apply Discount to Target Price ---
-    const discountAmount = (basePrice * priceInfo.discount) / 100;
-    let finalAmount = basePrice - discountAmount;
-    
-    console.log(`[Calc] Base: ${basePrice} | Discount: ${discountAmount} | Subtotal: ${finalAmount}`);
-
-    // --- 3. Calculate UPGRADE Diff (User gets credit for old plan) ---
-    let isUpgrade = false;
-    let oldPlanCredit = 0.00;
-    
-    if (user.subscription.status === 'active' && 
-        user.subscription.tier === 'pro' && 
-        tier === 'pro_plus') {
-        
-        isUpgrade = true;
-        
-        // A. Determine Old Base Price (Based on User's Cycle)
-        let oldBasePrice = 0.00;
-        if (user.subscription.cycle === 'monthly') {
-            oldBasePrice = PRICING.pro.monthly;
-        } else {
-            oldBasePrice = PRICING.pro.annual_per_month * 12;
-        }
-
-        // B. Apply Discount to Old Price
-        const oldDiscountAmount = (oldBasePrice * PRICING.pro.discount) / 100;
-        oldPlanCredit = oldBasePrice - oldDiscountAmount;
-
-        console.log(`[Upgrade] Subtracting Old Credit (Discounted): ${oldPlanCredit}`);
-        finalAmount = finalAmount - oldPlanCredit;
-    }
-
-    // Precision Check
-    if (finalAmount < 0) finalAmount = 0;
-
-    // --- WHOLE NUMBER LOGIC (Strict Floor) ---
     finalAmount = Math.floor(finalAmount);
-    
-    // Convert to paise
     const amountInPaise = finalAmount * 100; 
 
-    console.log(`[Final] Amount to Charge: ${finalAmount}`);
-
     const receiptId = `rcpt_${Date.now()}`;
-    const options = { 
-        amount: amountInPaise, 
-        currency: "INR", 
-        receipt: receiptId, 
-        notes: { userId: googleId, tier, cycle, isUpgrade: isUpgrade, oldCredit: oldPlanCredit, basePrice: basePrice } 
-    };
-
-    const order = await razorpay.orders.create(options);
-    user.orders.push({ 
-        orderId: order.id, 
-        amount: finalAmount, 
-        date: new Date(), 
-        status: "created", 
-        tier, 
-        cycle, 
-        receipt: receiptId, 
-        currency: "INR" 
-    });
+    const order = await razorpay.orders.create({ amount: amountInPaise, currency: "INR", receipt: receiptId });
+    
+    user.orders.push({ orderId: order.id, amount: finalAmount, date: new Date(), status: "created", tier, cycle, receipt: receiptId });
     await user.save();
 
-    res.json({ 
-        order_id: order.id, 
-        amount: amountInPaise, 
-        currency: "INR", 
-        key_id: RAZORPAY_KEY_ID, 
-        user_name: user.name, 
-        user_email: user.email, 
-        user_contact: user.phone || "" 
-    });
-  } catch (err) {
-    console.error("Payment Create Error:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
+    res.json({ order_id: order.id, amount: amountInPaise, currency: "INR", key_id: RAZORPAY_KEY_ID });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// 4. PAYMENT VERIFY (Restored Full Logic)
+// PAYMENT - VERIFY
 app.post("/api/payment/verify", async (req, res) => {
   try {
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
@@ -408,36 +255,26 @@ app.post("/api/payment/verify", async (req, res) => {
     if (expectedSignature === razorpay_signature) {
       const user = await User.findOne({ "orders.orderId": razorpay_order_id });
       if (!user) return res.status(404).json({ error: "Order not found" });
-      const order = user.orders.find((o) => o.orderId === razorpay_order_id);
       
-      try {
-        const paymentDetails = await razorpay.payments.fetch(razorpay_payment_id);
-        if(paymentDetails.contact && !user.phone) user.phone = paymentDetails.contact; 
-        if(order) order.method = paymentDetails.method;
-      } catch (e) {}
-
+      const order = user.orders.find((o) => o.orderId === razorpay_order_id);
       user.subscription.status = "active";
       user.subscription.tier = order?.tier || "pro";
       user.subscription.cycle = order?.cycle || "monthly";
-      
       const days = order?.cycle === "annual" ? 365 : 30;
       user.subscription.validUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
-
-      if (order) { order.status = "paid"; order.paymentId = razorpay_payment_id; order.signature = razorpay_signature; }
+      
+      if (order) { order.status = "paid"; order.paymentId = razorpay_payment_id; }
       await user.save();
-      return res.json({ status: "success", success: true });
+      return res.json({ success: true });
     } else {
-      return res.status(400).json({ status: "failure", success: false, error: "Invalid Signature" });
+      return res.status(400).json({ success: false, error: "Invalid Signature" });
     }
-  } catch (err) {
-    res.status(500).json({ error: "Verification failed" });
-  }
+  } catch (err) { res.status(500).json({ error: "Verification failed" }); }
 });
 
-// 5. STREAM CHAT (Updated for Screenshots)
+// CHAT STREAM (Vision Enabled)
 app.post("/api/chat-stream", async (req, res) => {
   const googleId = req.headers["x-google-id"];
-   
   if (googleId) {
     const check = await checkAndIncrementUsage(googleId);
     if (!check.allowed) return res.status(403).json({ error: "Limit reached" });
@@ -447,59 +284,36 @@ app.post("/api/chat-stream", async (req, res) => {
   if (!message || !message.role) return res.status(400).json({ error: "Invalid Body" });
 
   const convId = conversationId || `conv_${Date.now()}`;
-
-  // Handle Vision/Screenshot Content
   let newMessage = { role: message.role, content: message.content };
+  
+  // Vision Handling
   if (message.screenshot) {
-    let sc = message.screenshot;
-    // Ensure Base64 formatting
-    if (!sc.startsWith("data:image")) {
-        sc = `data:image/jpeg;base64,${sc}`;
-    }
+    let sc = message.screenshot.startsWith("data:image") ? message.screenshot : `data:image/jpeg;base64,${message.screenshot}`;
     newMessage = { 
         role: message.role, 
-        content: [
-            { type: "text", text: message.content || "Analyze this image." },
-            { type: "image_url", image_url: { url: sc } }
-        ]
+        content: [ { type: "text", text: message.content || "Analyze image." }, { type: "image_url", image_url: { url: sc } } ]
     };
   }
 
   try {
-    const conversation = await Conversation.findOneAndUpdate(
-      { conversationId: convId },
-      { 
-        $push: { messages: newMessage },
-        $set: { updatedAt: new Date(), userId: googleId }
-      },
-      { new: true, upsert: true }
-    );
+    // Save User Msg
+    await Conversation.findOneAndUpdate({ conversationId: convId }, { $push: { messages: newMessage }, $set: { updatedAt: new Date(), userId: googleId }}, { new: true, upsert: true });
 
-    const history = conversation.messages.map(m => ({ role: m.role, content: m.content }));
+    // OpenAI Call
+    const conv = await Conversation.findOne({ conversationId: convId });
+    const history = conv.messages.map(m => ({ role: m.role, content: m.content }));
 
     res.setHeader("x-conversation-id", convId);
-    res.setHeader("Content-Type", "text/plain; charset=utf-8");
-    res.setHeader("Transfer-Encoding", "chunked");
+    res.setHeader("Content-Type", "text/plain");
 
     const openaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ 
-          model: "gpt-4o", // Upgraded to 4o for Vision capability
-          messages: history, 
-          temperature: 0.6, 
-          stream: true 
-      })
+      body: JSON.stringify({ model: "gpt-4o", messages: history, stream: true })
     });
 
-    if (!openaiRes.ok) {
-        res.statusCode = 500;
-        res.end(`OpenAI Error: ${openaiRes.status}`);
-        return;
-    }
-
-    let fullAiResponse = "";
     const decoder = new TextDecoder();
+    let fullAiResponse = "";
 
     for await (const chunk of openaiRes.body) {
         const text = decoder.decode(chunk, { stream: true });
@@ -507,66 +321,36 @@ app.post("/api/chat-stream", async (req, res) => {
         for (const line of lines) {
             if (line.startsWith('data: ') && line !== 'data: [DONE]') {
                 try {
-                    const json = JSON.parse(line.replace('data: ', ''));
-                    const content = json.choices[0]?.delta?.content || "";
+                    const content = JSON.parse(line.replace('data: ', '')).choices[0]?.delta?.content || "";
                     fullAiResponse += content;
+                    res.write(content);
                 } catch (e) { }
             }
         }
-        res.write(chunk); 
     }
-
+    
     if (fullAiResponse) {
-        await Conversation.updateOne(
-            { conversationId: convId },
-            { $push: { messages: { role: "assistant", content: fullAiResponse } } }
-        );
+        await Conversation.updateOne({ conversationId: convId }, { $push: { messages: { role: "assistant", content: fullAiResponse } } });
     }
-
     res.end();
-  } catch (err) {
-    console.error("❌ [AI] Stream Error:", err);
-    if (!res.headersSent) res.status(500).end("Internal Stream Error");
-  }
+
+  } catch (err) { res.status(500).end("Stream Error"); }
 });
 
-// 6. TRANSCRIPTION
+// TRANSCRIPTION
 app.post("/api/transcribe", upload.single("file"), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: "Missing file or file too large" });
-    
-    const mime = req.file.mimetype || "audio/webm";
-    const filename = req.file.originalname || "audio.webm";
+    if (!req.file) return res.status(400).json({ error: "No file" });
     const formData = new FormData();
-    const blob = new Blob([req.file.buffer], { type: mime });
-    
-    formData.append("file", blob, filename);
+    formData.append("file", new Blob([req.file.buffer], { type: req.file.mimetype }), "audio.wav");
     formData.append("model", "whisper-1"); 
-    formData.append("language", "en");
 
     const openaiRes = await fetch("https://api.openai.com/v1/audio/transcriptions", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
-        body: formData
+        method: "POST", headers: { Authorization: `Bearer ${OPENAI_API_KEY}` }, body: formData
     });
-      
     const data = await openaiRes.json();
-    if (!openaiRes.ok) throw new Error(data.error?.message || "OpenAI Error");
-
     res.json({ text: data.text || "" });
-  } catch (err) {
-    console.error("❌ [TRANSCRIPTION] Error:", err.message);
-    res.status(500).json({ error: "Transcription failed" });
-  }
+  } catch (err) { res.status(500).json({ error: "Transcription failed" }); }
 });
 
-app.get('*', (req, res, next) => {
-  if (req.path.startsWith('/api')) return next();
-  if (req.path.includes('.')) return next();
-  if (req.path === '/') return res.sendFile(path.join(__dirname, 'index.html'));
-  res.sendFile(path.join(__dirname, req.path + '.html'), (err) => { if (err) next(); });
-});
-
-app.listen(PORT, () => {
-  console.log(`✅ Backend listening on http://localhost:${PORT}`);
-});
+app.listen(PORT, () => console.log(`✅ Backend running on port ${PORT}`));
