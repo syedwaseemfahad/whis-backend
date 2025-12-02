@@ -16,6 +16,13 @@ const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/whis-a
 const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
 const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
 
+// PAYPAL CONFIG
+const PAYPAL_CLIENT_ID = process.env.PAYPAL_CLIENT_ID;
+const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET;
+// Switch to "https://api-m.sandbox.paypal.com" for testing, "https://api-m.paypal.com" for live
+const PAYPAL_BASE_URL = process.env.PAYPAL_MODE === 'sandbox' ? "https://api-m.sandbox.paypal.com" : "https://api-m.paypal.com";
+const INR_TO_USD_RATE = 0.012; // Update this manually or fetch live rates if needed
+
 // --- PRICING CONFIGURATION (STRICTLY FROM ENV) ---
 const PRICING = {
   pro: {
@@ -37,6 +44,7 @@ console.table(PRICING);
 
 if (!OPENAI_API_KEY) console.error("⚠️  MISSING: OPENAI_API_KEY");
 if (!RAZORPAY_KEY_ID) console.error("⚠️  MISSING: RAZORPAY_KEY_ID");
+if (!PAYPAL_CLIENT_ID) console.error("⚠️  MISSING: PAYPAL_CLIENT_ID");
 if (isNaN(PRICING.pro.monthly) || isNaN(PRICING.pro_plus.monthly)) {
     console.error("❌ CRITICAL: Pricing Environment Variables are missing or invalid!");
 }
@@ -212,6 +220,27 @@ async function checkAndIncrementUsage(googleId) {
   return { allowed: true, tier: 'free', remaining: 10 - user.freeUsage.count };
 }
 
+// --- HELPER: PayPal Token ---
+async function getPayPalAccessToken() {
+    if (!PAYPAL_CLIENT_ID || !PAYPAL_CLIENT_SECRET) {
+        throw new Error("Missing PayPal Credentials");
+    }
+    const auth = Buffer.from(PAYPAL_CLIENT_ID + ":" + PAYPAL_CLIENT_SECRET).toString("base64");
+    const response = await fetch(`${PAYPAL_BASE_URL}/v1/oauth2/token`, {
+        method: "POST",
+        body: "grant_type=client_credentials",
+        headers: {
+            Authorization: `Basic ${auth}`,
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+    });
+    if (!response.ok) {
+        throw new Error(`PayPal Auth Failed: ${response.statusText}`);
+    }
+    const data = await response.json();
+    return data.access_token;
+}
+
 // ================= ROUTES =================
 
 app.get("/ping", (req, res) => res.send("pong"));
@@ -281,7 +310,7 @@ app.get("/api/user/status", async (req, res) => {
   }
 });
 
-// 3. PAYMENT ROUTES
+// 3. PAYMENT ROUTES (RAZORPAY)
 app.post("/api/payment/create-order", async (req, res) => {
   try {
     const { googleId, tier, cycle } = req.body; 
@@ -417,6 +446,143 @@ app.post("/api/payment/verify", async (req, res) => {
     }
   } catch (err) {
     res.status(500).json({ error: "Verification failed" });
+  }
+});
+
+// 3.1. NEW PAYMENT ROUTES (PAYPAL)
+app.post("/api/payment/create-paypal-order", async (req, res) => {
+  try {
+    const { googleId, tier, cycle } = req.body;
+    const user = await User.findOne({ googleId });
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    // --- DUPLICATE PRICING LOGIC FOR SAFETY ---
+    let priceInfo;
+    let basePrice = 0.00;
+
+    if (tier === "pro") {
+        priceInfo = PRICING.pro;
+        basePrice = (cycle === "annual") ? (priceInfo.annual_per_month * 12) : priceInfo.monthly;
+    } else if (tier === "pro_plus") {
+        priceInfo = PRICING.pro_plus;
+        basePrice = (cycle === "annual") ? (priceInfo.annual_per_month * 12) : priceInfo.monthly;
+    } else {
+        return res.status(400).json({ error: "Invalid tier" });
+    }
+
+    const discountAmount = (basePrice * priceInfo.discount) / 100;
+    let finalAmountINR = basePrice - discountAmount;
+
+    // Check Upgrade logic
+    let isUpgrade = false;
+    let oldPlanCredit = 0.00;
+
+    if (user.subscription.status === 'active' && 
+        user.subscription.tier === 'pro' && 
+        tier === 'pro_plus') {
+        
+        isUpgrade = true;
+        let oldBasePrice = (user.subscription.cycle === 'monthly') ? PRICING.pro.monthly : (PRICING.pro.annual_per_month * 12);
+        const oldDiscountAmount = (oldBasePrice * PRICING.pro.discount) / 100;
+        oldPlanCredit = oldBasePrice - oldDiscountAmount;
+        finalAmountINR = finalAmountINR - oldPlanCredit;
+    }
+    
+    if (finalAmountINR < 0) finalAmountINR = 0;
+    finalAmountINR = Math.floor(finalAmountINR);
+
+    // --- CONVERT TO USD ---
+    let finalAmountUSD = (finalAmountINR * INR_TO_USD_RATE).toFixed(2);
+    if(finalAmountUSD < 0.1) finalAmountUSD = "0.10"; // Minimum PayPal charge
+
+    console.log(`[PayPal] INR: ${finalAmountINR} -> USD: ${finalAmountUSD}`);
+
+    const accessToken = await getPayPalAccessToken();
+    const orderRes = await fetch(`${PAYPAL_BASE_URL}/v2/checkout/orders`, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({
+            intent: "CAPTURE",
+            purchase_units: [{
+                amount: { currency_code: "USD", value: finalAmountUSD },
+                description: `${tier.toUpperCase()} Plan (${cycle})`
+            }]
+        })
+    });
+
+    const orderData = await orderRes.json();
+    if (!orderData.id) throw new Error("Failed to create PayPal Order");
+
+    // Save initial order info to DB
+    user.orders.push({
+        orderId: orderData.id,
+        amount: parseFloat(finalAmountUSD), // Storing USD amount
+        currency: "USD",
+        date: new Date(),
+        status: "created",
+        tier,
+        cycle,
+        receipt: `pp_${Date.now()}`,
+        method: "paypal",
+        notes: { originalINR: finalAmountINR, isUpgrade }
+    });
+    await user.save();
+
+    res.json({ id: orderData.id });
+
+  } catch (err) {
+    console.error("PayPal Create Error:", err);
+    res.status(500).json({ error: "PayPal creation failed" });
+  }
+});
+
+app.post("/api/payment/verify-paypal", async (req, res) => {
+  try {
+      const { orderID, googleId } = req.body;
+      const user = await User.findOne({ googleId });
+      if (!user) return res.status(404).json({ error: "User not found" });
+
+      const dbOrder = user.orders.find(o => o.orderId === orderID);
+      if (!dbOrder) return res.status(404).json({ error: "Order record not found" });
+
+      const accessToken = await getPayPalAccessToken();
+      
+      // CAPTURE THE PAYMENT
+      const captureRes = await fetch(`${PAYPAL_BASE_URL}/v2/checkout/orders/${orderID}/capture`, {
+          method: "POST",
+          headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${accessToken}`,
+          }
+      });
+      
+      const captureData = await captureRes.json();
+      
+      // Check if Completed
+      if (captureData.status === "COMPLETED") {
+          dbOrder.status = "paid";
+          dbOrder.paymentId = captureData.purchase_units[0].payments.captures[0].id;
+          
+          user.subscription.status = "active";
+          user.subscription.tier = dbOrder.tier;
+          user.subscription.cycle = dbOrder.cycle;
+          
+          const days = dbOrder.cycle === "annual" ? 365 : 30;
+          user.subscription.validUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+          
+          await user.save();
+          res.json({ success: true });
+      } else {
+          console.error("PayPal Capture Failed:", captureData);
+          res.status(400).json({ success: false, error: "Payment not completed" });
+      }
+
+  } catch (err) {
+      console.error("PayPal Verify Error:", err);
+      res.status(500).json({ error: "Verification Error" });
   }
 });
 
