@@ -11,12 +11,27 @@ const url = require("url");
 
 // --- CONFIGURATION ---
 const PORT = process.env.PORT || 4000;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/whis-app";
+
+// 1. OpenAI Config
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+
+// 2. App & Auth Config
+const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:4000";
+const APP_AUTH_TOKEN = process.env.APP_AUTH_TOKEN;
+const WEBSITE_PRICING_URL = process.env.WEBSITE_PRICING_URL;
+
+// 3. Google Auth Config
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI;
+
+// 4. Payment Gateways
 const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
 const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
 
-// PAYPAL CONFIG
+// PayPal Config
 const PAYPAL_CLIENT_ID = process.env.PAYPAL_CLIENT_ID;
 const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET;
 // Switch based on env variable
@@ -45,6 +60,7 @@ console.table(PRICING);
 if (!OPENAI_API_KEY) console.error("⚠️  MISSING: OPENAI_API_KEY");
 if (!RAZORPAY_KEY_ID) console.error("⚠️  MISSING: RAZORPAY_KEY_ID");
 if (!PAYPAL_CLIENT_ID) console.error("⚠️  MISSING: PAYPAL_CLIENT_ID");
+if (!GOOGLE_CLIENT_ID) console.error("⚠️  MISSING: GOOGLE_CLIENT_ID");
 
 // Error check for pricing
 if (isNaN(PRICING.pro.monthly) || isNaN(PRICING.pro_plus.monthly)) {
@@ -173,7 +189,7 @@ app.use((req, res, next) => {
 
     if (referrerDomain) updates.$addToSet["referrers"] = referrerDomain;
     else delete updates.$addToSet;
-    
+     
     if (googleId) updates.$set["userId"] = googleId;
 
     Metric.findOneAndUpdate(
@@ -251,7 +267,8 @@ app.get("/ping", (req, res) => res.send("pong"));
 app.get("/api/config", (req, res) => {
     res.json({
         pricing: PRICING,
-        googleClientId: process.env.GOOGLE_CLIENT_ID
+        googleClientId: GOOGLE_CLIENT_ID,
+        websitePricingUrl: WEBSITE_PRICING_URL // Optional: Send pricing URL to frontend if needed
     });
 });
 
@@ -323,7 +340,7 @@ app.post("/api/payment/create-order", async (req, res) => {
 
     let priceInfo;
     let basePrice = 0.00;
-    
+     
     if (tier === "pro") {
         priceInfo = PRICING.pro;
         basePrice = (cycle === "annual") ? (priceInfo.annual_per_month * 12) : priceInfo.monthly;
@@ -336,12 +353,12 @@ app.post("/api/payment/create-order", async (req, res) => {
 
     const discountAmount = (basePrice * priceInfo.discount) / 100;
     let finalAmount = basePrice - discountAmount;
-    
+     
     console.log(`[Calc] Base: ${basePrice} | Discount: ${discountAmount} | Subtotal: ${finalAmount}`);
 
     let isUpgrade = false;
     let oldPlanCredit = 0.00;
-    
+     
     if (user.subscription.status === 'active' && 
         user.subscription.tier === 'pro' && 
         tier === 'pro_plus') {
@@ -364,7 +381,7 @@ app.post("/api/payment/create-order", async (req, res) => {
 
     if (finalAmount < 0) finalAmount = 0;
     finalAmount = Math.floor(finalAmount);
-    
+     
     const amountInPaise = finalAmount * 100; 
 
     console.log(`[Final] Amount to Charge: ${finalAmount}`);
@@ -478,7 +495,7 @@ app.post("/api/payment/create-paypal-order", async (req, res) => {
         oldPlanCredit = oldBasePrice - oldDiscountAmount;
         finalAmountINR = finalAmountINR - oldPlanCredit;
     }
-    
+     
     if (finalAmountINR < 0) finalAmountINR = 0;
     finalAmountINR = Math.floor(finalAmountINR);
 
@@ -511,7 +528,7 @@ app.post("/api/payment/create-paypal-order", async (req, res) => {
     });
 
     const orderData = await orderRes.json();
-    
+     
     // --- BETTER ERROR LOGGING ---
     if (!orderRes.ok || !orderData.id) {
         console.error("❌ PayPal Order Failed. Response from PayPal:", JSON.stringify(orderData, null, 2));
@@ -633,7 +650,7 @@ app.post("/api/chat-stream", async (req, res) => {
     const openaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model: "gpt-4o-mini", messages: history, temperature: 0.6, stream: true })
+      body: JSON.stringify({ model: OPENAI_MODEL, messages: history, temperature: 0.6, stream: true })
     });
 
     if (!openaiRes.ok) {
@@ -678,7 +695,7 @@ app.post("/api/chat-stream", async (req, res) => {
 app.post("/api/transcribe", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "Missing file or file too large (Max 5MB)" });
-    
+     
     const mime = req.file.mimetype || "audio/webm";
     const filename = req.file.originalname || "audio.webm";
     const formData = new FormData();
