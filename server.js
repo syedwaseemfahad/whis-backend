@@ -61,6 +61,7 @@ if (!OPENAI_API_KEY) console.error("⚠️  MISSING: OPENAI_API_KEY");
 if (!RAZORPAY_KEY_ID) console.error("⚠️  MISSING: RAZORPAY_KEY_ID");
 if (!PAYPAL_CLIENT_ID) console.error("⚠️  MISSING: PAYPAL_CLIENT_ID");
 if (!GOOGLE_CLIENT_ID) console.error("⚠️  MISSING: GOOGLE_CLIENT_ID");
+if (!GOOGLE_CLIENT_SECRET) console.error("⚠️  MISSING: GOOGLE_CLIENT_SECRET");
 
 // Error check for pricing
 if (isNaN(PRICING.pro.monthly) || isNaN(PRICING.pro_plus.monthly)) {
@@ -268,17 +269,54 @@ app.get("/api/config", (req, res) => {
     res.json({
         pricing: PRICING,
         googleClientId: GOOGLE_CLIENT_ID,
-        websitePricingUrl: WEBSITE_PRICING_URL // Optional: Send pricing URL to frontend if needed
+        websitePricingUrl: WEBSITE_PRICING_URL 
     });
 });
 
-// 1. AUTH
+// 1. AUTH - UPDATED FOR SECURE CODE EXCHANGE
 app.post("/api/auth/google", async (req, res) => {
   try {
-    const { token, tokens } = req.body;
-    const idToken = token || (tokens && tokens.id_token);
-    if (!idToken) return res.status(400).json({ error: "Missing ID Token" });
+    // We now expect 'code' from the frontend (Secure Flow)
+    // Or 'token'/'tokens' for backward compatibility if needed
+    const { code, token, tokens } = req.body;
 
+    let idToken = token || (tokens && tokens.id_token);
+    let accessToken = tokens && tokens.access_token;
+
+    // --- NEW: Secure Server-Side Exchange ---
+    if (code) {
+        if (!GOOGLE_CLIENT_SECRET) {
+            console.error("Missing GOOGLE_CLIENT_SECRET on Backend");
+            return res.status(500).json({ error: "Server misconfiguration" });
+        }
+
+        const params = new URLSearchParams();
+        params.append("code", code);
+        params.append("client_id", GOOGLE_CLIENT_ID);
+        params.append("client_secret", GOOGLE_CLIENT_SECRET);
+        // Important: This must match the URI used in Electron exactly
+        params.append("redirect_uri", GOOGLE_REDIRECT_URI); 
+        params.append("grant_type", "authorization_code");
+
+        const exchangeRes = await fetch("https://oauth2.googleapis.com/token", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: params
+        });
+
+        const exchangeData = await exchangeRes.json();
+        if (!exchangeRes.ok) {
+            console.error("Google Token Exchange Failed:", exchangeData);
+            return res.status(401).json({ error: "Failed to exchange code" });
+        }
+
+        idToken = exchangeData.id_token;
+        accessToken = exchangeData.access_token;
+    }
+
+    if (!idToken) return res.status(400).json({ error: "No authentication credential provided" });
+
+    // Validate and Get Profile
     const googleRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${idToken}`);
     if (!googleRes.ok) return res.status(401).json({ error: "Invalid Google Token" });
 
@@ -296,9 +334,12 @@ app.post("/api/auth/google", async (req, res) => {
       },
       { new: true, upsert: true }
     );
-    res.json({ success: true, user });
+    
+    // Return the user AND the tokens so Electron can save the session
+    res.json({ success: true, user, tokens: { id_token: idToken, access_token: accessToken } });
   } catch (err) {
-    res.status(500).json({ error: "Database error" });
+    console.error("Auth Error:", err);
+    res.status(500).json({ error: "Database or Auth error" });
   }
 });
 
