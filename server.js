@@ -19,9 +19,9 @@ const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
 // PAYPAL CONFIG
 const PAYPAL_CLIENT_ID = process.env.PAYPAL_CLIENT_ID;
 const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET;
-// Switch to "https://api-m.sandbox.paypal.com" for testing, "https://api-m.paypal.com" for live
+// Switch based on env variable
 const PAYPAL_BASE_URL = process.env.PAYPAL_MODE === 'sandbox' ? "https://api-m.sandbox.paypal.com" : "https://api-m.paypal.com";
-const INR_TO_USD_RATE = 0.012; // Update this manually or fetch live rates if needed
+const INR_TO_USD_RATE = 0.012; // Approx Exchange Rate
 
 // --- PRICING CONFIGURATION (STRICTLY FROM ENV) ---
 const PRICING = {
@@ -45,6 +45,8 @@ console.table(PRICING);
 if (!OPENAI_API_KEY) console.error("⚠️  MISSING: OPENAI_API_KEY");
 if (!RAZORPAY_KEY_ID) console.error("⚠️  MISSING: RAZORPAY_KEY_ID");
 if (!PAYPAL_CLIENT_ID) console.error("⚠️  MISSING: PAYPAL_CLIENT_ID");
+
+// Error check for pricing
 if (isNaN(PRICING.pro.monthly) || isNaN(PRICING.pro_plus.monthly)) {
     console.error("❌ CRITICAL: Pricing Environment Variables are missing or invalid!");
 }
@@ -319,7 +321,6 @@ app.post("/api/payment/create-order", async (req, res) => {
 
     console.log(`[Order] User: ${googleId} | Req Tier: ${tier} | Req Cycle: ${cycle}`);
 
-    // --- 1. Calculate TARGET Plan Price (Base) ---
     let priceInfo;
     let basePrice = 0.00;
     
@@ -333,13 +334,11 @@ app.post("/api/payment/create-order", async (req, res) => {
         return res.status(400).json({ error: "Invalid tier" });
     }
 
-    // --- 2. Apply Discount to Target Price ---
     const discountAmount = (basePrice * priceInfo.discount) / 100;
     let finalAmount = basePrice - discountAmount;
     
     console.log(`[Calc] Base: ${basePrice} | Discount: ${discountAmount} | Subtotal: ${finalAmount}`);
 
-    // --- 3. Calculate UPGRADE Diff (Corrected: Account for Old Plan Discount) ---
     let isUpgrade = false;
     let oldPlanCredit = 0.00;
     
@@ -349,7 +348,6 @@ app.post("/api/payment/create-order", async (req, res) => {
         
         isUpgrade = true;
         
-        // A. Determine Old Base Price (Based on User's Cycle)
         let oldBasePrice = 0.00;
         if (user.subscription.cycle === 'monthly') {
             oldBasePrice = PRICING.pro.monthly;
@@ -357,7 +355,6 @@ app.post("/api/payment/create-order", async (req, res) => {
             oldBasePrice = PRICING.pro.annual_per_month * 12;
         }
 
-        // B. Apply Discount to Old Price (FIX: User gets credit for what they PAID, not Base)
         const oldDiscountAmount = (oldBasePrice * PRICING.pro.discount) / 100;
         oldPlanCredit = oldBasePrice - oldDiscountAmount;
 
@@ -365,14 +362,9 @@ app.post("/api/payment/create-order", async (req, res) => {
         finalAmount = finalAmount - oldPlanCredit;
     }
 
-    // Precision Check
     if (finalAmount < 0) finalAmount = 0;
-
-    // --- WHOLE NUMBER LOGIC (Strict Floor) ---
-    // Rounds 1999.90 -> 1999
     finalAmount = Math.floor(finalAmount);
     
-    // Convert to paise
     const amountInPaise = finalAmount * 100; 
 
     console.log(`[Final] Amount to Charge: ${finalAmount}`);
@@ -432,7 +424,6 @@ app.post("/api/payment/verify", async (req, res) => {
 
       user.subscription.status = "active";
       user.subscription.tier = order?.tier || "pro";
-      // Update cycle so future upgrades are calculated correctly
       user.subscription.cycle = order?.cycle || "monthly";
       
       const days = order?.cycle === "annual" ? 365 : 30;
@@ -449,14 +440,14 @@ app.post("/api/payment/verify", async (req, res) => {
   }
 });
 
-// 3.1. NEW PAYMENT ROUTES (PAYPAL)
+// 3.1. NEW PAYMENT ROUTES (PAYPAL) - FIXED WITH NO_SHIPPING
 app.post("/api/payment/create-paypal-order", async (req, res) => {
   try {
     const { googleId, tier, cycle } = req.body;
     const user = await User.findOne({ googleId });
     if (!user) return res.status(404).json({ error: "User not found" });
 
-    // --- DUPLICATE PRICING LOGIC FOR SAFETY ---
+    // --- DUPLICATE PRICING LOGIC ---
     let priceInfo;
     let basePrice = 0.00;
 
@@ -493,7 +484,7 @@ app.post("/api/payment/create-paypal-order", async (req, res) => {
 
     // --- CONVERT TO USD ---
     let finalAmountUSD = (finalAmountINR * INR_TO_USD_RATE).toFixed(2);
-    if(finalAmountUSD < 0.1) finalAmountUSD = "0.10"; // Minimum PayPal charge
+    if(finalAmountUSD < 0.1) finalAmountUSD = "0.10"; 
 
     console.log(`[PayPal] INR: ${finalAmountINR} -> USD: ${finalAmountUSD}`);
 
@@ -509,17 +500,28 @@ app.post("/api/payment/create-paypal-order", async (req, res) => {
             purchase_units: [{
                 amount: { currency_code: "USD", value: finalAmountUSD },
                 description: `${tier.toUpperCase()} Plan (${cycle})`
-            }]
+            }],
+            // --- FIX: TELL PAYPAL THIS IS A DIGITAL GOOD ---
+            application_context: {
+                shipping_preference: "NO_SHIPPING", 
+                user_action: "PAY_NOW",
+                brand_name: "Whis AI"
+            }
         })
     });
 
     const orderData = await orderRes.json();
-    if (!orderData.id) throw new Error("Failed to create PayPal Order");
+    
+    // --- BETTER ERROR LOGGING ---
+    if (!orderRes.ok || !orderData.id) {
+        console.error("❌ PayPal Order Failed. Response from PayPal:", JSON.stringify(orderData, null, 2));
+        throw new Error("Failed to create PayPal Order");
+    }
 
     // Save initial order info to DB
     user.orders.push({
         orderId: orderData.id,
-        amount: parseFloat(finalAmountUSD), // Storing USD amount
+        amount: parseFloat(finalAmountUSD), 
         currency: "USD",
         date: new Date(),
         status: "created",
