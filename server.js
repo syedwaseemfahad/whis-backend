@@ -215,12 +215,25 @@ async function checkAndIncrementUsage(googleId) {
    
   if (!user) return { allowed: false, error: "User not found" };
 
+  // --- FIX APPLIED: HARDENED PRO CHECK ---
   if (user.subscription.status === 'active' && ['pro', 'pro_plus'].includes(user.subscription.tier)) {
-     if (user.subscription.validUntil && new Date() > user.subscription.validUntil) {
-         user.subscription.status = 'inactive';
-         user.subscription.tier = 'free';
-         await user.save();
+     if (user.subscription.validUntil) {
+         const expiry = new Date(user.subscription.validUntil);
+         const now = new Date();
+         
+         // Only downgrade if STRICTLY past the expiration time
+         if (now > expiry) {
+             console.log(`[Sub] Expired for ${googleId}. Downgrading.`);
+             user.subscription.status = 'inactive';
+             user.subscription.tier = 'free';
+             await user.save();
+             // Falls through to Free logic
+         } else {
+             // Valid Pro User: Return allowed immediately, do NOT count usage
+             return { allowed: true, tier: user.subscription.tier };
+         }
      } else {
+         // No expiration date (lifetime or bug) -> Treat as valid Pro
          return { allowed: true, tier: user.subscription.tier };
      }
   }
