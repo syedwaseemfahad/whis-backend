@@ -44,8 +44,9 @@ const FREE_SCREENSHOT_LIMIT = parseInt(process.env.FREE_SCREENSHOT_LIMIT || "3",
 const PAID_SCREENSHOT_LIMIT = parseInt(process.env.PAID_SCREENSHOT_LIMIT || "10", 10);
 const MAX_TEXT_CHAR_LIMIT = parseInt(process.env.MAX_TEXT_CHAR_LIMIT || "4096", 10);
 
-// --- MODIFIED: USE parseFloat FOR DECIMAL HOURS ---
-const FREE_TRIAL_HOURS = parseFloat(process.env.FREE_TRIAL_HOURS || "24");
+// --- NEW: ON-DEMAND TRIAL CONFIGURATION ---
+const MAX_TRIAL_SESSIONS = parseInt(process.env.MAX_TRIAL_SESSIONS || "3", 10);
+const TRIAL_DURATION_MINUTES = 10; 
 
 // --- PRICING CONFIGURATION ---
 const PRICING = {
@@ -63,7 +64,7 @@ const PRICING = {
 
 // --- INITIAL CHECKS ---
 console.log("--- 🚀 STARTING SERVER ---");
-console.log(`--- 📊 LIMITS: Trial=${FREE_TRIAL_HOURS}h, Free Chat=${FREE_DAILY_LIMIT}, Free SS=${FREE_SCREENSHOT_LIMIT}, Paid SS=${PAID_SCREENSHOT_LIMIT} ---`);
+console.log(`--- 📊 LIMITS: FreeChat=${FREE_DAILY_LIMIT}, MaxTrialSessions=${MAX_TRIAL_SESSIONS} ---`);
 
 if (!OPENAI_API_KEY) console.error("⚠️  MISSING: OPENAI_API_KEY");
 if (!RAZORPAY_KEY_ID) console.error("⚠️  MISSING: RAZORPAY_KEY_ID");
@@ -127,7 +128,12 @@ const userSchema = new mongoose.Schema({
     status: { type: String, enum: ["active", "inactive", "past_due"], default: "inactive" },
     tier: { type: String, enum: ["free", "pro", "pro_plus"], default: "free" },
     cycle: { type: String, enum: ["monthly", "annual"], default: "monthly" },
-    validUntil: Date
+    validUntil: Date,
+    isTrial: { type: Boolean, default: false } // Track if current status is a trial
+  },
+  // NEW: Track specific trial sessions
+  trialUsage: {
+    count: { type: Number, default: 0 }
   },
   freeUsage: {
     count: { type: Number, default: 0 },
@@ -237,7 +243,8 @@ async function checkAndIncrementUsage(googleId) {
    
   if (!user) return { allowed: false, error: "User not found" };
 
-  if (user.subscription.status === 'active' && ['pro', 'pro_plus'].includes(user.subscription.tier)) {
+  if (user.subscription.status === 'active') {
+     // Check if validUntil has passed
      if (user.subscription.validUntil) {
          const expiry = new Date(user.subscription.validUntil);
          const now = new Date();
@@ -245,15 +252,18 @@ async function checkAndIncrementUsage(googleId) {
              console.log(`[Sub] Expired for ${googleId}. Downgrading.`);
              user.subscription.status = 'inactive';
              user.subscription.tier = 'free';
+             user.subscription.isTrial = false;
              await user.save();
          } else {
              return { allowed: true, tier: user.subscription.tier };
          }
      } else {
+         // Should have expiry but if missing and active, assume allowed
          return { allowed: true, tier: user.subscription.tier };
      }
   }
 
+  // Free Tier Logic
   if (user.freeUsage.lastDate !== today) {
     user.freeUsage.count = 0;
     user.freeUsage.lastDate = today;
@@ -333,7 +343,8 @@ app.get("/api/config", (req, res) => {
             freeChat: FREE_DAILY_LIMIT,
             freeScreenshot: FREE_SCREENSHOT_LIMIT,
             paidScreenshot: PAID_SCREENSHOT_LIMIT,
-            maxTextChar: MAX_TEXT_CHAR_LIMIT
+            maxTextChar: MAX_TEXT_CHAR_LIMIT,
+            maxTrialSessions: MAX_TRIAL_SESSIONS
         }
     });
 });
@@ -377,20 +388,17 @@ app.post("/api/auth/google", async (req, res) => {
 
     const newSessionId = crypto.randomUUID();
 
-    // --- NEW: Calculate Trial Expiry with Decimal Hours ---
-    const trialEndTime = new Date(Date.now() + (FREE_TRIAL_HOURS * 60 * 60 * 1000));
-
+    // --- MODIFIED: REMOVED AUTOMATIC FREE TRIAL ---
+    // New users start as Free Tier (Inactive)
     const user = await User.findOneAndUpdate(
       { googleId },
       {
         email, name, avatarUrl, lastLogin: new Date(),
         currentSessionId: newSessionId,
         $setOnInsert: {
-          // Grant FREE TRIAL on creation
-          "subscription.status": "active", 
-          "subscription.tier": "pro_plus",
-          "subscription.cycle": "monthly", // Placeholder
-          "subscription.validUntil": trialEndTime,
+          "subscription.status": "inactive", 
+          "subscription.tier": "free",
+          "trialUsage.count": 0,
           
           "freeUsage.count": 0, "freeUsage.lastDate": new Date().toISOString().slice(0, 10),
           "screenshotUsage.count": 0, "screenshotUsage.lastDate": new Date().toISOString().slice(0, 10)
@@ -406,22 +414,66 @@ app.post("/api/auth/google", async (req, res) => {
   }
 });
 
-// === NEW: Session Rotation Endpoint ===
+// === NEW: ACTIVATE 10-MIN ON-DEMAND TRIAL ===
+app.post("/api/user/trial/start", async (req, res) => {
+    try {
+        const googleId = req.headers["x-google-id"];
+        const { tier } = req.body; // Expects 'pro' or 'pro_plus'
+        
+        if (!googleId) return res.status(401).json({ error: "Unauthorized" });
+        if (!['pro', 'pro_plus'].includes(tier)) return res.status(400).json({ error: "Invalid tier" });
+
+        const user = await User.findOne({ googleId });
+        if (!user) return res.status(404).json({ error: "User not found" });
+
+        // Check limits
+        if (user.trialUsage && user.trialUsage.count >= MAX_TRIAL_SESSIONS) {
+            return res.status(403).json({ error: "Maximum trial sessions reached." });
+        }
+
+        // Apply Trial
+        const now = new Date();
+        const expiry = new Date(now.getTime() + (TRIAL_DURATION_MINUTES * 60 * 1000)); // 10 minutes from now
+
+        user.subscription.status = "active";
+        user.subscription.tier = tier;
+        user.subscription.validUntil = expiry;
+        user.subscription.isTrial = true; // Mark as a trial session
+
+        // Increment count
+        if (!user.trialUsage) user.trialUsage = { count: 0 };
+        user.trialUsage.count += 1;
+
+        await user.save();
+
+        console.log(`[Trial] User ${user.email} started trial #${user.trialUsage.count} as ${tier}`);
+
+        res.json({ 
+            success: true, 
+            validUntil: expiry, 
+            sessionsUsed: user.trialUsage.count, 
+            maxSessions: MAX_TRIAL_SESSIONS 
+        });
+
+    } catch (err) {
+        console.error("Trial Start Error:", err);
+        res.status(500).json({ error: "Failed to start trial" });
+    }
+});
+
+
 app.post("/api/auth/session/rotate", async (req, res) => {
     try {
         const googleId = req.headers["x-google-id"];
         if(!googleId) return res.status(400).json({ error: "Missing ID" });
 
-        // Generate new session
         const newSessionId = crypto.randomUUID();
         
-        // Update DB
         await User.findOneAndUpdate(
             { googleId },
             { currentSessionId: newSessionId }
         );
 
-        console.log(`[Session] Rotated session for ${googleId}`);
         res.json({ success: true, newSessionId });
     } catch(err) {
         console.error("Rotation error:", err);
@@ -442,13 +494,14 @@ app.get("/api/user/status", async (req, res) => {
 
     // Session Mismatch Check
     if (user.currentSessionId && incomingSessionId && user.currentSessionId !== incomingSessionId) {
-        console.log(`[Security] Session Mismatch for ${user.email}. DB: ${user.currentSessionId} vs Incoming: ${incomingSessionId}`);
         return res.json({ sessionInvalid: true });
     }
 
+    // Auto-downgrade check (handles trial expiry too)
     if (user.subscription.status === "active" && user.subscription.validUntil && new Date() > user.subscription.validUntil) {
       user.subscription.status = "inactive";
       user.subscription.tier = "free";
+      user.subscription.isTrial = false;
       await user.save();
     }
 
@@ -456,6 +509,9 @@ app.get("/api/user/status", async (req, res) => {
       active: user.subscription.status === "active",
       tier: user.subscription.tier,
       validUntil: user.subscription.validUntil,
+      isTrial: !!user.subscription.isTrial, // Return trial status
+      trialUsage: user.trialUsage || { count: 0 },
+      maxTrialSessions: MAX_TRIAL_SESSIONS,
       freeUsage: user.freeUsage,
       screenshotUsage: user.screenshotUsage, 
       orders: user.orders ? user.orders.sort((a,b) => new Date(b.date) - new Date(a.date)) : []
@@ -467,7 +523,6 @@ app.get("/api/user/status", async (req, res) => {
 
 // === CONTEXT API ENDPOINTS ===
 
-// Get all contexts
 app.get("/api/user/context", async (req, res) => {
   try {
     const googleId = req.headers["x-google-id"];
@@ -482,7 +537,6 @@ app.get("/api/user/context", async (req, res) => {
   }
 });
 
-// Add or Update Context
 app.post("/api/user/context", async (req, res) => {
   try {
     const googleId = req.headers["x-google-id"];
@@ -494,7 +548,6 @@ app.post("/api/user/context", async (req, res) => {
     const user = await User.findOne({ googleId });
     if (!user) return res.status(404).json({ error: "User not found" });
 
-    // If setting this as active, deactivate others
     if (isActive) {
        user.contexts.forEach(c => c.isActive = false);
     }
@@ -502,13 +555,11 @@ app.post("/api/user/context", async (req, res) => {
     const existingIndex = user.contexts.findIndex(c => c.id === id);
 
     if (existingIndex > -1) {
-      // Update existing
       user.contexts[existingIndex].name = name;
       user.contexts[existingIndex].content = content;
       if (isActive !== undefined) user.contexts[existingIndex].isActive = isActive;
       user.contexts[existingIndex].updatedAt = new Date();
     } else {
-      // Create new
       if (user.contexts.length >= 10) {
         return res.status(400).json({ error: "Context limit reached (Max 10)" });
       }
@@ -529,19 +580,16 @@ app.post("/api/user/context", async (req, res) => {
   }
 });
 
-// Toggle Active State Only
 app.post("/api/user/context/toggle", async (req, res) => {
   try {
     const googleId = req.headers["x-google-id"];
-    const { id } = req.body; // If ID is null, it means "No Context"
+    const { id } = req.body;
 
     const user = await User.findOne({ googleId });
     if (!user) return res.status(404).json({ error: "User not found" });
 
-    // Set all to false first
     user.contexts.forEach(c => c.isActive = false);
 
-    // If an ID is provided, set that one to true
     if (id) {
       const target = user.contexts.find(c => c.id === id);
       if (target) target.isActive = true;
@@ -554,7 +602,6 @@ app.post("/api/user/context/toggle", async (req, res) => {
   }
 });
 
-// Delete Context
 app.delete("/api/user/context/:id", async (req, res) => {
   try {
     const googleId = req.headers["x-google-id"];
@@ -675,6 +722,7 @@ app.post("/api/payment/verify", async (req, res) => {
       user.subscription.status = "active";
       user.subscription.tier = order?.tier || "pro";
       user.subscription.cycle = order?.cycle || "monthly";
+      user.subscription.isTrial = false; // Reset trial flag if paying
       
       const days = order?.cycle === "annual" ? 365 : 30;
       user.subscription.validUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
@@ -808,6 +856,7 @@ app.post("/api/payment/verify-paypal", async (req, res) => {
           user.subscription.status = "active";
           user.subscription.tier = dbOrder.tier;
           user.subscription.cycle = dbOrder.cycle;
+          user.subscription.isTrial = false; // Reset trial
           
           const days = dbOrder.cycle === "annual" ? 365 : 30;
           user.subscription.validUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
@@ -902,7 +951,6 @@ app.post("/api/chat-stream", async (req, res) => {
         return { role: msg.role, content: msg.content };
     });
 
-    // --- 2. INJECT INTERVIEW PERSONA & CONTEXT ---
     const interviewSystemMsg = {
         role: "system",
         content: `You are an expert technical candidate in a high-stakes job interview. 
@@ -915,14 +963,9 @@ app.post("/api/chat-stream", async (req, res) => {
         4. **Clarity**: Make it easily understandable. Remove filler words.`
     };
     
-    // Unshift order: Last unshifted becomes first.
-    // We want: [Interview Persona, Context, ...User History]
-    
-    // Add Context First (so it is pushed down by Persona)
     if (systemContextMessage) {
         processedHistory.unshift(systemContextMessage);
     }
-    // Add Persona (so it stays at top)
     processedHistory.unshift(interviewSystemMsg);
 
     res.setHeader("x-conversation-id", convId);
