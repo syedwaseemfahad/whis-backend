@@ -39,6 +39,7 @@ const PAYPAL_BASE_URL = process.env.PAYPAL_MODE === 'sandbox' ? "https://api-m.s
 const INR_TO_USD_RATE = 0.012; 
 
 // --- LIMITS & TRIAL CONFIGURATION ---
+// STRICT INTEGER PARSING
 const FREE_DAILY_LIMIT = parseInt(process.env.FREE_DAILY_LIMIT || "10", 10);
 const FREE_SCREENSHOT_LIMIT = parseInt(process.env.FREE_SCREENSHOT_LIMIT || "3", 10);
 const PAID_SCREENSHOT_LIMIT = parseInt(process.env.PAID_SCREENSHOT_LIMIT || "10", 10);
@@ -237,16 +238,17 @@ app.use((req, res, next) => {
 
 app.use(express.static(__dirname));
 
-// === CRITICAL: ATOMIC USAGE CHECKER ===
+// === CRITICAL: ATOMIC USAGE CHECKER & INCREMENTER ===
 async function checkAndIncrementUsage(googleId) {
   const today = new Date().toISOString().slice(0, 10);
   
-  // 1. Fetch User for Status Check
+  // 1. Fetch User Data First (For Status Check)
   let user = await User.findOne({ googleId });
   if (!user) return { allowed: false, error: "User not found" };
 
-  // 2. Daily Reset (Safe to run before status check)
+  // 2. Perform Daily Reset Check
   if (user.freeUsage.lastDate !== today) {
+      // Atomic Reset
       user = await User.findOneAndUpdate(
           { googleId },
           { 
@@ -257,11 +259,11 @@ async function checkAndIncrementUsage(googleId) {
                   "screenshotUsage.lastDate": today 
               } 
           },
-          { new: true } // Return updated user
+          { new: true }
       );
   }
 
-  // 3. Status Check (Paid vs Trial vs Free)
+  // 3. Status Check (Active Paid OR Active Trial)
   let isTrialActive = user.subscription.isTrial && user.subscription.validUntil && new Date() < user.subscription.validUntil;
   let isPaidActive = user.subscription.status === 'active';
 
@@ -276,17 +278,17 @@ async function checkAndIncrementUsage(googleId) {
           }
       });
       isPaidActive = false;
-      // Re-evaluate trial status (unlikely to be true if it was paid active, but safe to set false)
-      isTrialActive = false;
+      isTrialActive = false; // ensure this is false too
   }
 
+  // If Premium or Valid Trial -> Allow (No increment of free counter)
   if (isPaidActive || isTrialActive) {
       return { allowed: true, tier: user.subscription.tier };
   }
 
   // 4. Free Tier - ATOMIC INCREMENT
-  // This query only succeeds if count is strictly less than limit.
-  // Prevents race conditions (15 vs 10 issue).
+  // This query is the fail-safe. It ONLY updates if count < LIMIT.
+  // It returns NULL if count >= LIMIT, preventing the "15 responses" issue.
   const result = await User.findOneAndUpdate(
       { 
           googleId: googleId, 
@@ -299,6 +301,12 @@ async function checkAndIncrementUsage(googleId) {
   if (result) {
       return { allowed: true, tier: 'free', remaining: FREE_DAILY_LIMIT - result.freeUsage.count };
   } else {
+      // Double check strictly to confirm it wasn't a DB error
+      const strictCheck = await User.findOne({ googleId });
+      if(strictCheck && strictCheck.freeUsage.count >= FREE_DAILY_LIMIT) {
+          return { allowed: false, error: "Daily limit reached" };
+      }
+      // Fallback allowed:false just in case
       return { allowed: false, error: "Daily limit reached" };
   }
 }
@@ -309,10 +317,15 @@ async function checkScreenshotLimit(googleId) {
     const user = await User.findOne({ googleId });
     if (!user) return { allowed: false, error: "User not found" };
 
-    // Reset logic handled in checkAndIncrementUsage mostly, but safe to repeat or check
+    if (!user.screenshotUsage) {
+        user.screenshotUsage = { count: 0, lastDate: today };
+    }
+
     if (user.screenshotUsage.lastDate !== today) {
-         // Reset will happen on next chat or we can force it here, but typically chat happens first.
-         // For safety in atomic op below, we assume date is managed. 
+        // Reset Logic handled in checkAndIncrementUsage mostly, but just in case
+        user.screenshotUsage.count = 0;
+        user.screenshotUsage.lastDate = today;
+        await user.save();
     }
 
     const isTrialActive = user.subscription.isTrial && user.subscription.validUntil && new Date() < user.subscription.validUntil;
@@ -320,7 +333,7 @@ async function checkScreenshotLimit(googleId) {
     
     const limit = isPaid ? PAID_SCREENSHOT_LIMIT : FREE_SCREENSHOT_LIMIT;
 
-    // Atomic Increment
+    // Atomic Increment with Limit Check
     const result = await User.findOneAndUpdate(
         { 
             googleId: googleId, 
@@ -328,7 +341,7 @@ async function checkScreenshotLimit(googleId) {
         },
         { 
             $inc: { "screenshotUsage.count": 1 },
-            $set: { "screenshotUsage.lastDate": today } // Ensure date is set
+            $set: { "screenshotUsage.lastDate": today }
         },
         { new: true }
     );
@@ -423,7 +436,6 @@ app.post("/api/auth/google", async (req, res) => {
 
     const newSessionId = crypto.randomUUID();
 
-    // --- MODIFIED: REMOVED AUTOMATIC FREE TRIAL ---
     // New users start as Free Tier (Inactive)
     const user = await User.findOneAndUpdate(
       { googleId },
@@ -470,13 +482,10 @@ app.post("/api/user/trial/start", async (req, res) => {
         const now = new Date();
         const expiry = new Date(now.getTime() + (TRIAL_DURATION_MINUTES * 60 * 1000)); // 10 minutes from now
 
-        // --- FIX: DO NOT SET STATUS ACTIVE IN DB ---
-        // This ensures websites checking 'subscription.status' see 'inactive'
-        // user.subscription.status = "active"; <--- REMOVED
-        
+        // --- FIX: DO NOT SET STATUS ACTIVE IN DB to keep Website pricing visible ---
         user.subscription.tier = tier;
         user.subscription.validUntil = expiry;
-        user.subscription.isTrial = true; // Mark as a trial session
+        user.subscription.isTrial = true; 
 
         // Increment count
         if (!user.trialUsage) user.trialUsage = { count: 0 };
@@ -511,8 +520,7 @@ app.post("/api/user/trial/end", async (req, res) => {
 
         // Only end if currently in a trial
         if (user.subscription.isTrial) {
-            // We don't change status because it remains 'inactive' during trials now.
-            // Just expire the time and flag.
+            // Expire immediately
             user.subscription.validUntil = new Date(); 
             user.subscription.tier = 'free'; 
             user.subscription.isTrial = false;
@@ -568,8 +576,8 @@ app.get("/api/user/status", async (req, res) => {
         return res.json({ sessionInvalid: true });
     }
 
-    // Auto-downgrade check (handles trial expiry too)
     const now = new Date();
+    // Auto-downgrade check (handles trial expiry too)
     if (user.subscription.status === "active" && user.subscription.validUntil && now > user.subscription.validUntil) {
       user.subscription.status = "inactive";
       user.subscription.tier = "free";
@@ -581,14 +589,12 @@ app.get("/api/user/status", async (req, res) => {
     const isRealActive = user.subscription.status === "active";
     const isTrialValid = user.subscription.isTrial && user.subscription.validUntil && now < user.subscription.validUntil;
 
-    // The Website (no app token) should NOT see 'active' if it's just a trial.
-    // The App (has app token) MUST see 'active' for trial to work.
+    // Website view: Only report active if it's a REAL paid subscription
+    // App View: Report active if Paid OR Trial
     let reportedActive = false;
-
     if (isAppRequest) {
         reportedActive = isRealActive || isTrialValid;
     } else {
-        // Website view: Only report active if it's a REAL paid subscription
         reportedActive = isRealActive;
     }
 
