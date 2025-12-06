@@ -44,8 +44,9 @@ const FREE_SCREENSHOT_LIMIT = parseInt(process.env.FREE_SCREENSHOT_LIMIT || "3",
 const PAID_SCREENSHOT_LIMIT = parseInt(process.env.PAID_SCREENSHOT_LIMIT || "10", 10);
 const MAX_TEXT_CHAR_LIMIT = parseInt(process.env.MAX_TEXT_CHAR_LIMIT || "4096", 10);
 
-// --- MODIFIED: USE parseFloat FOR DECIMAL HOURS ---
-const FREE_TRIAL_HOURS = parseFloat(process.env.FREE_TRIAL_HOURS || "24");
+// === MODIFIED: ON-DEMAND TRIAL CONFIG ===
+const MAX_TRIAL_SESSIONS = 3;
+const TRIAL_DURATION_MINUTES = 10;
 
 // --- PRICING CONFIGURATION ---
 const PRICING = {
@@ -63,7 +64,8 @@ const PRICING = {
 
 // --- INITIAL CHECKS ---
 console.log("--- 🚀 STARTING SERVER ---");
-console.log(`--- 📊 LIMITS: Trial=${FREE_TRIAL_HOURS}h, Free Chat=${FREE_DAILY_LIMIT}, Free SS=${FREE_SCREENSHOT_LIMIT}, Paid SS=${PAID_SCREENSHOT_LIMIT} ---`);
+console.log(`--- 📊 LIMITS: Free Chat=${FREE_DAILY_LIMIT}, Free SS=${FREE_SCREENSHOT_LIMIT}, Paid SS=${PAID_SCREENSHOT_LIMIT} ---`);
+console.log(`--- ⏳ TRIAL: ${MAX_TRIAL_SESSIONS} sessions of ${TRIAL_DURATION_MINUTES} mins each ---`);
 
 if (!OPENAI_API_KEY) console.error("⚠️  MISSING: OPENAI_API_KEY");
 if (!RAZORPAY_KEY_ID) console.error("⚠️  MISSING: RAZORPAY_KEY_ID");
@@ -128,6 +130,11 @@ const userSchema = new mongoose.Schema({
     tier: { type: String, enum: ["free", "pro", "pro_plus"], default: "free" },
     cycle: { type: String, enum: ["monthly", "annual"], default: "monthly" },
     validUntil: Date
+  },
+  // === NEW: TRIAL TRACKING ===
+  trialUsage: {
+      count: { type: Number, default: 0 }, // How many times they used the 10-min trial
+      lastUsed: Date
   },
   freeUsage: {
     count: { type: Number, default: 0 },
@@ -333,7 +340,9 @@ app.get("/api/config", (req, res) => {
             freeChat: FREE_DAILY_LIMIT,
             freeScreenshot: FREE_SCREENSHOT_LIMIT,
             paidScreenshot: PAID_SCREENSHOT_LIMIT,
-            maxTextChar: MAX_TEXT_CHAR_LIMIT
+            maxTextChar: MAX_TEXT_CHAR_LIMIT,
+            maxTrialSessions: MAX_TRIAL_SESSIONS,
+            trialDurationMinutes: TRIAL_DURATION_MINUTES
         }
     });
 });
@@ -377,8 +386,8 @@ app.post("/api/auth/google", async (req, res) => {
 
     const newSessionId = crypto.randomUUID();
 
-    // --- NEW: Calculate Trial Expiry with Decimal Hours ---
-    const trialEndTime = new Date(Date.now() + (FREE_TRIAL_HOURS * 60 * 60 * 1000));
+    // === MODIFIED: REMOVED AUTOMATIC 24H TRIAL ===
+    // New users start as Free/Inactive by default. They can request the 10-min trial later.
 
     const user = await User.findOneAndUpdate(
       { googleId },
@@ -386,14 +395,12 @@ app.post("/api/auth/google", async (req, res) => {
         email, name, avatarUrl, lastLogin: new Date(),
         currentSessionId: newSessionId,
         $setOnInsert: {
-          // Grant FREE TRIAL on creation
-          "subscription.status": "active", 
-          "subscription.tier": "pro_plus",
-          "subscription.cycle": "monthly", // Placeholder
-          "subscription.validUntil": trialEndTime,
+          "subscription.status": "inactive", // Default Inactive
+          "subscription.tier": "free",
           
           "freeUsage.count": 0, "freeUsage.lastDate": new Date().toISOString().slice(0, 10),
-          "screenshotUsage.count": 0, "screenshotUsage.lastDate": new Date().toISOString().slice(0, 10)
+          "screenshotUsage.count": 0, "screenshotUsage.lastDate": new Date().toISOString().slice(0, 10),
+          "trialUsage.count": 0 // Initialize trial count
         }
       },
       { new: true, upsert: true }
@@ -442,13 +449,16 @@ app.get("/api/user/status", async (req, res) => {
 
     // Session Mismatch Check
     if (user.currentSessionId && incomingSessionId && user.currentSessionId !== incomingSessionId) {
-        console.log(`[Security] Session Mismatch for ${user.email}. DB: ${user.currentSessionId} vs Incoming: ${incomingSessionId}`);
         return res.json({ sessionInvalid: true });
     }
 
+    // === VALIDITY CHECK (CRITICAL FOR 10-MIN TRIALS) ===
     if (user.subscription.status === "active" && user.subscription.validUntil && new Date() > user.subscription.validUntil) {
+      console.log(`[Sub/Trial] Expired for ${user.email}. Disabling.`);
       user.subscription.status = "inactive";
       user.subscription.tier = "free";
+      // Clear validUntil so it doesn't look like a future date
+      user.subscription.validUntil = null; 
       await user.save();
     }
 
@@ -458,11 +468,63 @@ app.get("/api/user/status", async (req, res) => {
       validUntil: user.subscription.validUntil,
       freeUsage: user.freeUsage,
       screenshotUsage: user.screenshotUsage, 
+      trialUsage: user.trialUsage, // Send trial info to frontend
       orders: user.orders ? user.orders.sort((a,b) => new Date(b.date) - new Date(a.date)) : []
     });
   } catch (err) {
     res.status(500).json({ error: "Failed to check status" });
   }
+});
+
+// === NEW: START ON-DEMAND TRIAL ===
+app.post("/api/user/start-trial", async (req, res) => {
+    try {
+        const googleId = req.headers["x-google-id"];
+        const { tier } = req.body; // "pro" or "pro_plus"
+
+        if (!googleId) return res.status(401).json({ error: "Unauthorized" });
+        if (!['pro', 'pro_plus'].includes(tier)) return res.status(400).json({ error: "Invalid tier selection" });
+
+        const user = await User.findOne({ googleId });
+        if (!user) return res.status(404).json({ error: "User not found" });
+
+        // Check if already active
+        if (user.subscription.status === 'active') {
+            return res.status(400).json({ error: "Subscription is already active" });
+        }
+
+        // Check Limits
+        if (user.trialUsage.count >= MAX_TRIAL_SESSIONS) {
+            return res.status(403).json({ error: "Maximum trial sessions exceeded." });
+        }
+
+        // Grant Trial
+        const now = Date.now();
+        const durationMs = TRIAL_DURATION_MINUTES * 60 * 1000;
+        
+        user.subscription.status = "active";
+        user.subscription.tier = tier;
+        user.subscription.validUntil = new Date(now + durationMs);
+        
+        user.trialUsage.count += 1;
+        user.trialUsage.lastUsed = new Date();
+
+        await user.save();
+
+        console.log(`[Trial] Started ${TRIAL_DURATION_MINUTES}m trial for ${user.email} (Count: ${user.trialUsage.count})`);
+
+        res.json({ 
+            success: true, 
+            status: user.subscription.status,
+            tier: user.subscription.tier,
+            validUntil: user.subscription.validUntil,
+            trialCount: user.trialUsage.count
+        });
+
+    } catch (err) {
+        console.error("Start Trial Error:", err);
+        res.status(500).json({ error: "Failed to start trial" });
+    }
 });
 
 // === CONTEXT API ENDPOINTS ===
