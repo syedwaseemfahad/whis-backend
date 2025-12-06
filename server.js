@@ -461,6 +461,36 @@ app.post("/api/user/trial/start", async (req, res) => {
     }
 });
 
+// === NEW: END TRIAL IMMEDIATELY ===
+app.post("/api/user/trial/end", async (req, res) => {
+    try {
+        const googleId = req.headers["x-google-id"];
+        if (!googleId) return res.status(401).json({ error: "Unauthorized" });
+
+        const user = await User.findOne({ googleId });
+        if (!user) return res.status(404).json({ error: "User not found" });
+
+        if (user.subscription.isTrial && user.subscription.status === 'active') {
+             // Set validUntil to the past to expire it immediately
+             user.subscription.validUntil = new Date(Date.now() - 1000); 
+             // We let the status checker handle changing 'active' to 'inactive' 
+             // or we can force it here:
+             user.subscription.status = "inactive";
+             user.subscription.tier = "free";
+             user.subscription.isTrial = false;
+
+             await user.save();
+             return res.json({ success: true, message: "Trial ended." });
+        }
+
+        res.json({ success: false, message: "No active trial to end." });
+
+    } catch (err) {
+        console.error("Trial End Error:", err);
+        res.status(500).json({ error: "Failed to end trial" });
+    }
+});
+
 
 app.post("/api/auth/session/rotate", async (req, res) => {
     try {
@@ -506,11 +536,8 @@ app.get("/api/user/status", async (req, res) => {
     }
 
     res.json({
-      // We report active status, but we separate trial users logic in payment endpoints
       active: user.subscription.status === "active",
-      // MODIFIED: If it's a trial, report 'free' tier so UI shows Upgrade options, 
-      // but Backend still honors the real tier in checkAndIncrementUsage.
-      tier: user.subscription.isTrial ? 'free' : user.subscription.tier,
+      tier: user.subscription.tier,
       validUntil: user.subscription.validUntil,
       isTrial: !!user.subscription.isTrial, // Return trial status
       trialUsage: user.trialUsage || { count: 0 },
@@ -647,9 +674,7 @@ app.post("/api/payment/create-order", async (req, res) => {
     let isUpgrade = false;
     let oldPlanCredit = 0.00;
      
-    // MODIFIED: Ensure TRIAL users don't get Upgrade credit (Loophole Fix)
     if (user.subscription.status === 'active' && 
-        !user.subscription.isTrial && // <--- ADDED: Must NOT be a trial to get credit
         user.subscription.tier === 'pro' && 
         tier === 'pro_plus') {
         
@@ -768,9 +793,7 @@ app.post("/api/payment/create-paypal-order", async (req, res) => {
     let isUpgrade = false;
     let oldPlanCredit = 0.00;
 
-    // MODIFIED: Ensure TRIAL users don't get Upgrade credit (Loophole Fix)
     if (user.subscription.status === 'active' && 
-        !user.subscription.isTrial && // <--- ADDED: Must NOT be a trial to get credit
         user.subscription.tier === 'pro' && 
         tier === 'pro_plus') {
         
