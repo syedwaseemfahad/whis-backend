@@ -506,8 +506,11 @@ app.get("/api/user/status", async (req, res) => {
     }
 
     res.json({
+      // We report active status, but we separate trial users logic in payment endpoints
       active: user.subscription.status === "active",
-      tier: user.subscription.tier,
+      // MODIFIED: If it's a trial, report 'free' tier so UI shows Upgrade options, 
+      // but Backend still honors the real tier in checkAndIncrementUsage.
+      tier: user.subscription.isTrial ? 'free' : user.subscription.tier,
       validUntil: user.subscription.validUntil,
       isTrial: !!user.subscription.isTrial, // Return trial status
       trialUsage: user.trialUsage || { count: 0 },
@@ -644,7 +647,9 @@ app.post("/api/payment/create-order", async (req, res) => {
     let isUpgrade = false;
     let oldPlanCredit = 0.00;
      
+    // MODIFIED: Ensure TRIAL users don't get Upgrade credit (Loophole Fix)
     if (user.subscription.status === 'active' && 
+        !user.subscription.isTrial && // <--- ADDED: Must NOT be a trial to get credit
         user.subscription.tier === 'pro' && 
         tier === 'pro_plus') {
         
@@ -763,7 +768,9 @@ app.post("/api/payment/create-paypal-order", async (req, res) => {
     let isUpgrade = false;
     let oldPlanCredit = 0.00;
 
+    // MODIFIED: Ensure TRIAL users don't get Upgrade credit (Loophole Fix)
     if (user.subscription.status === 'active' && 
+        !user.subscription.isTrial && // <--- ADDED: Must NOT be a trial to get credit
         user.subscription.tier === 'pro' && 
         tier === 'pro_plus') {
         
