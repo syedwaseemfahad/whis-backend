@@ -43,8 +43,9 @@ const FREE_DAILY_LIMIT = parseInt(process.env.FREE_DAILY_LIMIT || "10", 10);
 const FREE_SCREENSHOT_LIMIT = parseInt(process.env.FREE_SCREENSHOT_LIMIT || "3", 10);
 const PAID_SCREENSHOT_LIMIT = parseInt(process.env.PAID_SCREENSHOT_LIMIT || "10", 10);
 const MAX_TEXT_CHAR_LIMIT = parseInt(process.env.MAX_TEXT_CHAR_LIMIT || "4096", 10);
-// NEW: Configurable Trial Hours
-const FREE_TRIAL_HOURS = parseInt(process.env.FREE_TRIAL_HOURS || "24", 10);
+
+// --- MODIFIED: USE parseFloat FOR DECIMAL HOURS ---
+const FREE_TRIAL_HOURS = parseFloat(process.env.FREE_TRIAL_HOURS || "24");
 
 // --- PRICING CONFIGURATION ---
 const PRICING = {
@@ -376,7 +377,7 @@ app.post("/api/auth/google", async (req, res) => {
 
     const newSessionId = crypto.randomUUID();
 
-    // --- NEW: Calculate Trial Expiry ---
+    // --- NEW: Calculate Trial Expiry with Decimal Hours ---
     const trialEndTime = new Date(Date.now() + (FREE_TRIAL_HOURS * 60 * 60 * 1000));
 
     const user = await User.findOneAndUpdate(
