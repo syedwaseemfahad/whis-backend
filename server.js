@@ -789,6 +789,33 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
   }
 });
 
+// --- NEW ROUTE: Draft Transcription (Missing in previous context) ---
+app.post("/api/transcribe-draft", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "Missing file" });
+    const mime = req.file.mimetype || "audio/webm";
+    const filename = req.file.originalname || "audio.webm";
+    const formData = new FormData();
+    formData.append("file", new Blob([req.file.buffer], { type: mime }), filename);
+    formData.append("model", "whisper-1"); 
+    formData.append("language", "en");
+
+    const openaiRes = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
+        body: formData
+    });
+    const data = await openaiRes.json();
+    if (!openaiRes.ok) throw new Error(data.error?.message || "OpenAI Error");
+    
+    // Log for server monitoring if needed, but client console will print it
+    res.json({ text: data.text || "" });
+  } catch (err) {
+    console.error("Draft Transcribe Error:", err);
+    res.status(500).json({ error: "Draft Transcription failed" });
+  }
+});
+
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api')) return next();
   if (req.path.includes('.')) return next();
