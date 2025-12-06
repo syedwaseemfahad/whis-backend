@@ -42,6 +42,8 @@ const INR_TO_USD_RATE = 0.012;
 const FREE_DAILY_LIMIT = parseInt(process.env.FREE_DAILY_LIMIT || "10", 10);
 const FREE_SCREENSHOT_LIMIT = parseInt(process.env.FREE_SCREENSHOT_LIMIT || "3", 10);
 const PAID_SCREENSHOT_LIMIT = parseInt(process.env.PAID_SCREENSHOT_LIMIT || "10", 10);
+// NEW: Character Limit for Input/Voice
+const MAX_TEXT_CHAR_LIMIT = parseInt(process.env.MAX_TEXT_CHAR_LIMIT || "4096", 10);
 
 // --- PRICING CONFIGURATION ---
 const PRICING = {
@@ -59,7 +61,7 @@ const PRICING = {
 
 // --- INITIAL CHECKS ---
 console.log("--- 🚀 STARTING SERVER ---");
-console.log(`--- 📊 LIMITS: Free Chat=${FREE_DAILY_LIMIT}, Free SS=${FREE_SCREENSHOT_LIMIT}, Paid SS=${PAID_SCREENSHOT_LIMIT} ---`);
+console.log(`--- 📊 LIMITS: Free Chat=${FREE_DAILY_LIMIT}, Free SS=${FREE_SCREENSHOT_LIMIT}, Paid SS=${PAID_SCREENSHOT_LIMIT}, Max Char=${MAX_TEXT_CHAR_LIMIT} ---`);
 
 if (!OPENAI_API_KEY) console.error("⚠️  MISSING: OPENAI_API_KEY");
 if (!RAZORPAY_KEY_ID) console.error("⚠️  MISSING: RAZORPAY_KEY_ID");
@@ -323,7 +325,8 @@ app.get("/api/config", (req, res) => {
         limits: {
             freeChat: FREE_DAILY_LIMIT,
             freeScreenshot: FREE_SCREENSHOT_LIMIT,
-            paidScreenshot: PAID_SCREENSHOT_LIMIT
+            paidScreenshot: PAID_SCREENSHOT_LIMIT,
+            maxTextChar: MAX_TEXT_CHAR_LIMIT // Send char limit to frontend
         }
     });
 });
@@ -682,6 +685,12 @@ app.post("/api/chat-stream", async (req, res) => {
 
   const { conversationId, message } = req.body || {};
   if (!message || !message.role) return res.status(400).json({ error: "Invalid Body" });
+
+  // --- NEW: Backend Truncation Logic (Failsafe) ---
+  if (message.content && message.content.length > MAX_TEXT_CHAR_LIMIT) {
+      // Instead of rejecting, slice it (matching behavior requested)
+      message.content = message.content.slice(-MAX_TEXT_CHAR_LIMIT);
+  }
 
   // 2. Screenshot Specific Limit Check (Uses Env Variables)
   if (message.screenshot && googleId) {
