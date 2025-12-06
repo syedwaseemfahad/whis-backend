@@ -42,7 +42,6 @@ const INR_TO_USD_RATE = 0.012;
 const FREE_DAILY_LIMIT = parseInt(process.env.FREE_DAILY_LIMIT || "10", 10);
 const FREE_SCREENSHOT_LIMIT = parseInt(process.env.FREE_SCREENSHOT_LIMIT || "3", 10);
 const PAID_SCREENSHOT_LIMIT = parseInt(process.env.PAID_SCREENSHOT_LIMIT || "10", 10);
-// NEW: Character Limit for Input/Voice
 const MAX_TEXT_CHAR_LIMIT = parseInt(process.env.MAX_TEXT_CHAR_LIMIT || "4096", 10);
 
 // --- PRICING CONFIGURATION ---
@@ -119,6 +118,8 @@ const userSchema = new mongoose.Schema({
   name: String,
   avatarUrl: String,
   phone: String,
+  // NEW: Session Control Field
+  currentSessionId: { type: String, default: "" },
   subscription: {
     status: { type: String, enum: ["active", "inactive", "past_due"], default: "inactive" },
     tier: { type: String, enum: ["free", "pro", "pro_plus"], default: "free" },
@@ -224,7 +225,6 @@ async function checkAndIncrementUsage(googleId) {
    
   if (!user) return { allowed: false, error: "User not found" };
 
-  // Pro/Pro+ Logic
   if (user.subscription.status === 'active' && ['pro', 'pro_plus'].includes(user.subscription.tier)) {
      if (user.subscription.validUntil) {
          const expiry = new Date(user.subscription.validUntil);
@@ -242,7 +242,6 @@ async function checkAndIncrementUsage(googleId) {
      }
   }
 
-  // Free Logic
   if (user.freeUsage.lastDate !== today) {
     user.freeUsage.count = 0;
     user.freeUsage.lastDate = today;
@@ -273,7 +272,6 @@ async function checkScreenshotLimit(googleId) {
     }
 
     const isPaid = user.subscription.status === 'active' && ['pro', 'pro_plus'].includes(user.subscription.tier);
-    // Use ENV variables for limits
     const limit = isPaid ? PAID_SCREENSHOT_LIMIT : FREE_SCREENSHOT_LIMIT;
 
     if (user.screenshotUsage.count >= limit) {
@@ -316,7 +314,7 @@ async function getPayPalAccessToken() {
 
 app.get("/ping", (req, res) => res.send("pong"));
 
-// 0. CONFIG ROUTE - Sends Pricing + Client ID + LIMITS to UI
+// 0. CONFIG ROUTE
 app.get("/api/config", (req, res) => {
     res.json({
         pricing: PRICING,
@@ -326,12 +324,12 @@ app.get("/api/config", (req, res) => {
             freeChat: FREE_DAILY_LIMIT,
             freeScreenshot: FREE_SCREENSHOT_LIMIT,
             paidScreenshot: PAID_SCREENSHOT_LIMIT,
-            maxTextChar: MAX_TEXT_CHAR_LIMIT // Send char limit to frontend
+            maxTextChar: MAX_TEXT_CHAR_LIMIT
         }
     });
 });
 
-// 1. AUTH
+// 1. AUTH - UPDATED WITH SESSION ID
 app.post("/api/auth/google", async (req, res) => {
   try {
     const { code, token, tokens } = req.body;
@@ -369,10 +367,15 @@ app.post("/api/auth/google", async (req, res) => {
     const payload = await googleRes.json();
     const { sub: googleId, email, name, picture: avatarUrl } = payload;
 
+    // NEW: Generate a unique session ID for THIS login
+    const newSessionId = crypto.randomUUID();
+
     const user = await User.findOneAndUpdate(
       { googleId },
       {
         email, name, avatarUrl, lastLogin: new Date(),
+        // IMPORTANT: Update session ID in DB
+        currentSessionId: newSessionId,
         $setOnInsert: {
           "subscription.status": "inactive", "subscription.tier": "free",
           "freeUsage.count": 0, "freeUsage.lastDate": new Date().toISOString().slice(0, 10),
@@ -389,14 +392,24 @@ app.post("/api/auth/google", async (req, res) => {
   }
 });
 
-// 2. USER STATUS
+// 2. USER STATUS - UPDATED WITH SESSION CHECK
 app.get("/api/user/status", async (req, res) => {
   try {
     const googleId = req.headers["x-google-id"];
+    // NEW: Receive Session ID
+    const incomingSessionId = req.headers["x-session-id"];
+    
     if (!googleId) return res.status(401).json({ error: "Not authenticated" });
 
     const user = await User.findOne({ googleId });
     if (!user) return res.json({ active: false, tier: null });
+
+    // NEW: Check for Duplicate Session
+    // If DB has a session ID, and incoming one is different, it's an old/duplicate session.
+    if (user.currentSessionId && incomingSessionId && user.currentSessionId !== incomingSessionId) {
+        console.log(`[Security] Session Mismatch for ${user.email}. Closing old session.`);
+        return res.json({ sessionInvalid: true });
+    }
 
     if (user.subscription.status === "active" && user.subscription.validUntil && new Date() > user.subscription.validUntil) {
       user.subscription.status = "inactive";
@@ -417,6 +430,7 @@ app.get("/api/user/status", async (req, res) => {
   }
 });
 
+// ... (Rest of the file remains exactly the same: Payment routes, Chat stream, etc.) ...
 // 3. PAYMENT ROUTES (RAZORPAY)
 app.post("/api/payment/create-order", async (req, res) => {
   try {
@@ -723,8 +737,24 @@ app.post("/api/chat-stream", async (req, res) => {
       },
       { new: true, upsert: true }
     );
+    
+    // OPTIMIZATION: Only send context of last 10 messages and strip old images
+    const CONTEXT_WINDOW_SIZE = 10;
+    const rawHistory = conversation.messages.slice(-CONTEXT_WINDOW_SIZE);
 
-    const history = conversation.messages.map(m => ({ role: m.role, content: m.content }));
+    const processedHistory = rawHistory.map((msg, index) => {
+        if (index === rawHistory.length - 1) {
+             return { role: msg.role, content: msg.content };
+        }
+        if (Array.isArray(msg.content)) {
+             const textPart = msg.content.find(c => c.type === 'text');
+             return {
+                 role: msg.role,
+                 content: textPart ? textPart.text : "[Screenshot sent]" 
+             };
+        }
+        return { role: msg.role, content: msg.content };
+    });
 
     res.setHeader("x-conversation-id", convId);
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
@@ -733,7 +763,7 @@ app.post("/api/chat-stream", async (req, res) => {
     const openaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model: OPENAI_MODEL, messages: history, temperature: 0.6, stream: true })
+      body: JSON.stringify({ model: OPENAI_MODEL, messages: processedHistory, temperature: 0.6, stream: true })
     });
 
     if (!openaiRes.ok) {
@@ -802,10 +832,6 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
 app.post("/api/transcribe-draft", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "Missing file" });
-    
-    // Log receipt of draft
-    console.log(`[Draft] Received draft audio: ${req.file.size} bytes`);
-
     const mime = req.file.mimetype || "audio/webm";
     const filename = req.file.originalname || "audio.webm";
     const formData = new FormData();
