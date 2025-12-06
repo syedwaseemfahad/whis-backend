@@ -134,6 +134,17 @@ const userSchema = new mongoose.Schema({
     count: { type: Number, default: 0 },
     lastDate: { type: String }
   },
+  // --- NEW: CONTEXT FEATURE ---
+  contexts: [
+    {
+      id: { type: String, required: true }, // uuid
+      name: { type: String, required: true }, // e.g., "Resume", "Job Desc"
+      content: { type: String, required: true },
+      isActive: { type: Boolean, default: false },
+      updatedAt: { type: Date, default: Date.now }
+    }
+  ],
+  // ---------------------------
   orders: [
     {
       orderId: String, paymentId: String, signature: String, amount: Number,
@@ -436,12 +447,128 @@ app.get("/api/user/status", async (req, res) => {
       validUntil: user.subscription.validUntil,
       freeUsage: user.freeUsage,
       screenshotUsage: user.screenshotUsage, 
-      orders: user.orders ? user.orders.sort((a,b) => new Date(b.date) - new Date(a.date)) : []
+      orders: user.orders ? user.orders.sort((a,b) => new Date(b.date) - new Date(a.date)) : [],
+      // NEW: Send contexts back (optional, but good for sync)
+      contexts: user.contexts || [] 
     });
   } catch (err) {
     res.status(500).json({ error: "Failed to check status" });
   }
 });
+
+
+// ==========================================
+// --- NEW: CONTEXT MANAGEMENT ENDPOINTS ---
+// ==========================================
+
+// Get all contexts
+app.get("/api/user/context", async (req, res) => {
+  try {
+    const googleId = req.headers["x-google-id"];
+    if (!googleId) return res.status(401).json({ error: "Unauthorized" });
+
+    const user = await User.findOne({ googleId }, { contexts: 1 });
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    res.json({ contexts: user.contexts || [] });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch contexts" });
+  }
+});
+
+// Add or Update Context
+app.post("/api/user/context", async (req, res) => {
+  try {
+    const googleId = req.headers["x-google-id"];
+    const { id, name, content, isActive } = req.body;
+    
+    if (!googleId) return res.status(401).json({ error: "Unauthorized" });
+    if (!name || !content) return res.status(400).json({ error: "Name and content required" });
+
+    const user = await User.findOne({ googleId });
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    // If setting this as active, deactivate others
+    if (isActive) {
+       user.contexts.forEach(c => c.isActive = false);
+    }
+
+    const existingIndex = user.contexts.findIndex(c => c.id === id);
+
+    if (existingIndex > -1) {
+      // Update existing
+      user.contexts[existingIndex].name = name;
+      user.contexts[existingIndex].content = content;
+      if (isActive !== undefined) user.contexts[existingIndex].isActive = isActive;
+      user.contexts[existingIndex].updatedAt = new Date();
+    } else {
+      // Create new
+      if (user.contexts.length >= 10) {
+        return res.status(400).json({ error: "Context limit reached (Max 10)" });
+      }
+      user.contexts.push({
+        id: id || crypto.randomUUID(),
+        name,
+        content,
+        isActive: !!isActive,
+        updatedAt: new Date()
+      });
+    }
+
+    await user.save();
+    res.json({ success: true, contexts: user.contexts });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to save context" });
+  }
+});
+
+// Toggle Active State Only
+app.post("/api/user/context/toggle", async (req, res) => {
+  try {
+    const googleId = req.headers["x-google-id"];
+    const { id } = req.body; // If ID is null, it means "No Context"
+
+    const user = await User.findOne({ googleId });
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    // Set all to false first
+    user.contexts.forEach(c => c.isActive = false);
+
+    // If an ID is provided, set that one to true
+    if (id) {
+      const target = user.contexts.find(c => c.id === id);
+      if (target) target.isActive = true;
+    }
+
+    await user.save();
+    res.json({ success: true, contexts: user.contexts });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to toggle context" });
+  }
+});
+
+// Delete Context
+app.delete("/api/user/context/:id", async (req, res) => {
+  try {
+    const googleId = req.headers["x-google-id"];
+    const contextId = req.params.id;
+
+    await User.updateOne(
+      { googleId },
+      { $pull: { contexts: { id: contextId } } }
+    );
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to delete" });
+  }
+});
+
+
+// ==========================================
+// --- PAYMENT ENDPOINTS (Unchanged) ---
+// ==========================================
 
 app.post("/api/payment/create-order", async (req, res) => {
   try {
@@ -717,6 +844,22 @@ app.post("/api/chat-stream", async (req, res) => {
       }
   }
 
+  // --- NEW: FETCH ACTIVE CONTEXT ---
+  let systemContextMessage = null;
+  if (googleId) {
+     const user = await User.findOne({ googleId }, { contexts: 1 });
+     if (user && user.contexts) {
+         const activeCtx = user.contexts.find(c => c.isActive);
+         if (activeCtx) {
+             systemContextMessage = {
+                 role: "system",
+                 content: `CRITICAL CONTEXT INSTRUCTION:\nThe user has provided the following specific context for this conversation (e.g., a resume, job description, or meeting notes).\nYou must adapt your answers to align with this context.\n\n=== CONTEXT START ===\n${activeCtx.content}\n=== CONTEXT END ===\n\nIf the user's query is unrelated to this context, answer normally but keep the context in mind if it becomes relevant.`
+             };
+         }
+     }
+  }
+  // ---------------------------------
+
   const convId = conversationId || `conv_${Date.now()}`;
 
   let newMessage = { role: message.role, content: message.content };
@@ -757,6 +900,12 @@ app.post("/api/chat-stream", async (req, res) => {
         }
         return { role: msg.role, content: msg.content };
     });
+
+    // --- INJECT CONTEXT ---
+    if (systemContextMessage) {
+        processedHistory.unshift(systemContextMessage);
+    }
+    // ---------------------
 
     res.setHeader("x-conversation-id", convId);
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
