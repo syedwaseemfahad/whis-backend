@@ -38,11 +38,13 @@ const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET;
 const PAYPAL_BASE_URL = process.env.PAYPAL_MODE === 'sandbox' ? "https://api-m.sandbox.paypal.com" : "https://api-m.paypal.com";
 const INR_TO_USD_RATE = 0.012; 
 
-// --- LIMITS CONFIGURATION (FROM ENV) ---
+// --- LIMITS & TRIAL CONFIGURATION ---
 const FREE_DAILY_LIMIT = parseInt(process.env.FREE_DAILY_LIMIT || "10", 10);
 const FREE_SCREENSHOT_LIMIT = parseInt(process.env.FREE_SCREENSHOT_LIMIT || "3", 10);
 const PAID_SCREENSHOT_LIMIT = parseInt(process.env.PAID_SCREENSHOT_LIMIT || "10", 10);
 const MAX_TEXT_CHAR_LIMIT = parseInt(process.env.MAX_TEXT_CHAR_LIMIT || "4096", 10);
+// NEW: Configurable Trial Hours
+const FREE_TRIAL_HOURS = parseInt(process.env.FREE_TRIAL_HOURS || "24", 10);
 
 // --- PRICING CONFIGURATION ---
 const PRICING = {
@@ -60,7 +62,7 @@ const PRICING = {
 
 // --- INITIAL CHECKS ---
 console.log("--- 🚀 STARTING SERVER ---");
-console.log(`--- 📊 LIMITS: Free Chat=${FREE_DAILY_LIMIT}, Free SS=${FREE_SCREENSHOT_LIMIT}, Paid SS=${PAID_SCREENSHOT_LIMIT}, Max Char=${MAX_TEXT_CHAR_LIMIT} ---`);
+console.log(`--- 📊 LIMITS: Trial=${FREE_TRIAL_HOURS}h, Free Chat=${FREE_DAILY_LIMIT}, Free SS=${FREE_SCREENSHOT_LIMIT}, Paid SS=${PAID_SCREENSHOT_LIMIT} ---`);
 
 if (!OPENAI_API_KEY) console.error("⚠️  MISSING: OPENAI_API_KEY");
 if (!RAZORPAY_KEY_ID) console.error("⚠️  MISSING: RAZORPAY_KEY_ID");
@@ -134,7 +136,7 @@ const userSchema = new mongoose.Schema({
     count: { type: Number, default: 0 },
     lastDate: { type: String }
   },
-  // --- NEW: CONTEXT FEATURE ---
+  // --- CONTEXT FEATURE ---
   contexts: [
     {
       id: { type: String, required: true }, // uuid
@@ -374,13 +376,21 @@ app.post("/api/auth/google", async (req, res) => {
 
     const newSessionId = crypto.randomUUID();
 
+    // --- NEW: Calculate Trial Expiry ---
+    const trialEndTime = new Date(Date.now() + (FREE_TRIAL_HOURS * 60 * 60 * 1000));
+
     const user = await User.findOneAndUpdate(
       { googleId },
       {
         email, name, avatarUrl, lastLogin: new Date(),
         currentSessionId: newSessionId,
         $setOnInsert: {
-          "subscription.status": "inactive", "subscription.tier": "free",
+          // Grant FREE TRIAL on creation
+          "subscription.status": "active", 
+          "subscription.tier": "pro_plus",
+          "subscription.cycle": "monthly", // Placeholder
+          "subscription.validUntil": trialEndTime,
+          
           "freeUsage.count": 0, "freeUsage.lastDate": new Date().toISOString().slice(0, 10),
           "screenshotUsage.count": 0, "screenshotUsage.lastDate": new Date().toISOString().slice(0, 10)
         }
@@ -454,7 +464,7 @@ app.get("/api/user/status", async (req, res) => {
   }
 });
 
-// === NEW: CONTEXT API ENDPOINTS ===
+// === CONTEXT API ENDPOINTS ===
 
 // Get all contexts
 app.get("/api/user/context", async (req, res) => {
