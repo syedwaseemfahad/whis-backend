@@ -243,24 +243,29 @@ async function checkAndIncrementUsage(googleId) {
    
   if (!user) return { allowed: false, error: "User not found" };
 
-  if (user.subscription.status === 'active') {
-     // Check if validUntil has passed
+  const isTrialActive = user.subscription.isTrial && user.subscription.validUntil && new Date() < user.subscription.validUntil;
+  const isPaidActive = user.subscription.status === 'active';
+
+  // Check Expiry for Paid Users
+  if (isPaidActive) {
      if (user.subscription.validUntil) {
          const expiry = new Date(user.subscription.validUntil);
-         const now = new Date();
-         if (now > expiry) {
+         if (new Date() > expiry) {
              console.log(`[Sub] Expired for ${googleId}. Downgrading.`);
              user.subscription.status = 'inactive';
              user.subscription.tier = 'free';
              user.subscription.isTrial = false;
              await user.save();
+             // Continue to free checks...
          } else {
              return { allowed: true, tier: user.subscription.tier };
          }
      } else {
-         // Should have expiry but if missing and active, assume allowed
          return { allowed: true, tier: user.subscription.tier };
      }
+  } else if (isTrialActive) {
+      // Trial is valid and running
+      return { allowed: true, tier: user.subscription.tier };
   }
 
   // Free Tier Logic
@@ -292,7 +297,9 @@ async function checkScreenshotLimit(googleId) {
         user.screenshotUsage.lastDate = today;
     }
 
-    const isPaid = user.subscription.status === 'active' && ['pro', 'pro_plus'].includes(user.subscription.tier);
+    const isTrialActive = user.subscription.isTrial && user.subscription.validUntil && new Date() < user.subscription.validUntil;
+    const isPaid = (user.subscription.status === 'active' || isTrialActive) && ['pro', 'pro_plus'].includes(user.subscription.tier);
+    
     const limit = isPaid ? PAID_SCREENSHOT_LIMIT : FREE_SCREENSHOT_LIMIT;
 
     if (user.screenshotUsage.count >= limit) {
@@ -435,7 +442,10 @@ app.post("/api/user/trial/start", async (req, res) => {
         const now = new Date();
         const expiry = new Date(now.getTime() + (TRIAL_DURATION_MINUTES * 60 * 1000)); // 10 minutes from now
 
-        user.subscription.status = "active";
+        // --- FIX: DO NOT SET STATUS ACTIVE IN DB ---
+        // This ensures websites checking 'subscription.status' see 'inactive'
+        // user.subscription.status = "active"; <--- REMOVED
+        
         user.subscription.tier = tier;
         user.subscription.validUntil = expiry;
         user.subscription.isTrial = true; // Mark as a trial session
@@ -472,9 +482,9 @@ app.post("/api/user/trial/end", async (req, res) => {
         if (!user) return res.status(404).json({ error: "User not found" });
 
         // Only end if currently in a trial
-        if (user.subscription.isTrial && user.subscription.status === 'active') {
-            user.subscription.status = 'inactive';
-            // Set expiry to now to invalidate it immediately
+        if (user.subscription.isTrial) {
+            // We don't change status because it remains 'inactive' during trials now.
+            // Just expire the time and flag.
             user.subscription.validUntil = new Date(); 
             user.subscription.tier = 'free'; 
             user.subscription.isTrial = false;
@@ -517,6 +527,9 @@ app.get("/api/user/status", async (req, res) => {
     const googleId = req.headers["x-google-id"];
     const incomingSessionId = req.headers["x-session-id"];
     
+    // Check if the request is from the App (via special header) or Website
+    const isAppRequest = req.headers["x-whis-auth"] === APP_AUTH_TOKEN;
+
     if (!googleId) return res.status(401).json({ error: "Not authenticated" });
 
     const user = await User.findOne({ googleId });
@@ -528,15 +541,31 @@ app.get("/api/user/status", async (req, res) => {
     }
 
     // Auto-downgrade check (handles trial expiry too)
-    if (user.subscription.status === "active" && user.subscription.validUntil && new Date() > user.subscription.validUntil) {
+    const now = new Date();
+    if (user.subscription.status === "active" && user.subscription.validUntil && now > user.subscription.validUntil) {
       user.subscription.status = "inactive";
       user.subscription.tier = "free";
       user.subscription.isTrial = false;
       await user.save();
     }
+    
+    // --- TRIAL VISIBILITY LOGIC ---
+    const isRealActive = user.subscription.status === "active";
+    const isTrialValid = user.subscription.isTrial && user.subscription.validUntil && now < user.subscription.validUntil;
+
+    // The Website (no app token) should NOT see 'active' if it's just a trial.
+    // The App (has app token) MUST see 'active' for trial to work.
+    let reportedActive = false;
+
+    if (isAppRequest) {
+        reportedActive = isRealActive || isTrialValid;
+    } else {
+        // Website view: Only report active if it's a REAL paid subscription
+        reportedActive = isRealActive;
+    }
 
     res.json({
-      active: user.subscription.status === "active",
+      active: reportedActive,
       tier: user.subscription.tier,
       validUntil: user.subscription.validUntil,
       isTrial: !!user.subscription.isTrial, // Return trial status
