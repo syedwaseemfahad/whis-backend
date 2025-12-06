@@ -39,7 +39,6 @@ const PAYPAL_BASE_URL = process.env.PAYPAL_MODE === 'sandbox' ? "https://api-m.s
 const INR_TO_USD_RATE = 0.012; 
 
 // --- LIMITS CONFIGURATION (FROM ENV) ---
-// Default to 10 for chats, 3 for free screenshots, 10 for paid screenshots if not set
 const FREE_DAILY_LIMIT = parseInt(process.env.FREE_DAILY_LIMIT || "10", 10);
 const FREE_SCREENSHOT_LIMIT = parseInt(process.env.FREE_SCREENSHOT_LIMIT || "3", 10);
 const PAID_SCREENSHOT_LIMIT = parseInt(process.env.PAID_SCREENSHOT_LIMIT || "10", 10);
@@ -68,7 +67,6 @@ if (!PAYPAL_CLIENT_ID) console.error("⚠️  MISSING: PAYPAL_CLIENT_ID");
 if (!GOOGLE_CLIENT_ID) console.error("⚠️  MISSING: GOOGLE_CLIENT_ID");
 if (!GOOGLE_CLIENT_SECRET) console.error("⚠️  MISSING: GOOGLE_CLIENT_SECRET");
 
-// Error check for pricing
 if (isNaN(PRICING.pro.monthly) || isNaN(PRICING.pro_plus.monthly)) {
     console.error("❌ CRITICAL: Pricing Environment Variables are missing or invalid!");
 }
@@ -234,7 +232,6 @@ async function checkAndIncrementUsage(googleId) {
              user.subscription.status = 'inactive';
              user.subscription.tier = 'free';
              await user.save();
-             // Falls through to Free logic
          } else {
              return { allowed: true, tier: user.subscription.tier };
          }
