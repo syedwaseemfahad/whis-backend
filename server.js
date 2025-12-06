@@ -35,11 +35,16 @@ const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
 // PayPal Config
 const PAYPAL_CLIENT_ID = process.env.PAYPAL_CLIENT_ID;
 const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET;
-// Switch based on env variable
 const PAYPAL_BASE_URL = process.env.PAYPAL_MODE === 'sandbox' ? "https://api-m.sandbox.paypal.com" : "https://api-m.paypal.com";
-const INR_TO_USD_RATE = 0.012; // Approx Exchange Rate
+const INR_TO_USD_RATE = 0.012; 
 
-// --- PRICING CONFIGURATION (STRICTLY FROM ENV) ---
+// --- LIMITS CONFIGURATION (FROM ENV) ---
+// Default to 10 for chats, 3 for free screenshots, 10 for paid screenshots if not set
+const FREE_DAILY_LIMIT = parseInt(process.env.FREE_DAILY_LIMIT || "10", 10);
+const FREE_SCREENSHOT_LIMIT = parseInt(process.env.FREE_SCREENSHOT_LIMIT || "3", 10);
+const PAID_SCREENSHOT_LIMIT = parseInt(process.env.PAID_SCREENSHOT_LIMIT || "10", 10);
+
+// --- PRICING CONFIGURATION ---
 const PRICING = {
   pro: {
     monthly: parseFloat(process.env.PRO_PER_MONTH), 
@@ -55,8 +60,7 @@ const PRICING = {
 
 // --- INITIAL CHECKS ---
 console.log("--- 🚀 STARTING SERVER ---");
-console.log("--- 💰 PRICING LOADED ---");
-console.table(PRICING); 
+console.log(`--- 📊 LIMITS: Free Chat=${FREE_DAILY_LIMIT}, Free SS=${FREE_SCREENSHOT_LIMIT}, Paid SS=${PAID_SCREENSHOT_LIMIT} ---`);
 
 if (!OPENAI_API_KEY) console.error("⚠️  MISSING: OPENAI_API_KEY");
 if (!RAZORPAY_KEY_ID) console.error("⚠️  MISSING: RAZORPAY_KEY_ID");
@@ -125,7 +129,6 @@ const userSchema = new mongoose.Schema({
     count: { type: Number, default: 0 },
     lastDate: { type: String }
   },
-  // --- NEW: Screenshot Usage Tracker ---
   screenshotUsage: {
     count: { type: Number, default: 0 },
     lastDate: { type: String }
@@ -214,20 +217,18 @@ app.use((req, res, next) => {
 // Serve Static Files
 app.use(express.static(__dirname));
 
-// --- HELPER: Usage Check ---
+// --- HELPER: Usage Check (Chat Limit) ---
 async function checkAndIncrementUsage(googleId) {
   const today = new Date().toISOString().slice(0, 10);
   const user = await User.findOne({ googleId });
    
   if (!user) return { allowed: false, error: "User not found" };
 
-  // --- FIX APPLIED: HARDENED PRO CHECK ---
+  // Pro/Pro+ Logic
   if (user.subscription.status === 'active' && ['pro', 'pro_plus'].includes(user.subscription.tier)) {
      if (user.subscription.validUntil) {
          const expiry = new Date(user.subscription.validUntil);
          const now = new Date();
-         
-         // Only downgrade if STRICTLY past the expiration time
          if (now > expiry) {
              console.log(`[Sub] Expired for ${googleId}. Downgrading.`);
              user.subscription.status = 'inactive';
@@ -235,61 +236,56 @@ async function checkAndIncrementUsage(googleId) {
              await user.save();
              // Falls through to Free logic
          } else {
-             // Valid Pro User: Return allowed immediately, do NOT count usage
              return { allowed: true, tier: user.subscription.tier };
          }
      } else {
-         // No expiration date (lifetime or bug) -> Treat as valid Pro
          return { allowed: true, tier: user.subscription.tier };
      }
   }
 
+  // Free Logic
   if (user.freeUsage.lastDate !== today) {
     user.freeUsage.count = 0;
     user.freeUsage.lastDate = today;
   }
 
-  if (user.freeUsage.count >= 10) {
+  if (user.freeUsage.count >= FREE_DAILY_LIMIT) {
     return { allowed: false, error: "Daily limit reached" };
   }
 
   user.freeUsage.count += 1;
   await user.save();
-  return { allowed: true, tier: 'free', remaining: 10 - user.freeUsage.count };
+  return { allowed: true, tier: 'free', remaining: FREE_DAILY_LIMIT - user.freeUsage.count };
 }
 
-// --- NEW HELPER: Screenshot Limit Check ---
+// --- HELPER: Screenshot Limit Check ---
 async function checkScreenshotLimit(googleId) {
     const today = new Date().toISOString().slice(0, 10);
     const user = await User.findOne({ googleId });
     if (!user) return { allowed: false, error: "User not found" };
 
-    // Initialize if missing (backward compatibility)
     if (!user.screenshotUsage) {
         user.screenshotUsage = { count: 0, lastDate: today };
     }
 
-    // Reset daily counter
     if (user.screenshotUsage.lastDate !== today) {
         user.screenshotUsage.count = 0;
         user.screenshotUsage.lastDate = today;
     }
 
-    // Determine Limit based on Subscription
     const isPaid = user.subscription.status === 'active' && ['pro', 'pro_plus'].includes(user.subscription.tier);
-    // LIMITS: Paid = 10, Free = 3
-    const limit = isPaid ? 10 : 3;
+    // Use ENV variables for limits
+    const limit = isPaid ? PAID_SCREENSHOT_LIMIT : FREE_SCREENSHOT_LIMIT;
 
     if (user.screenshotUsage.count >= limit) {
         return { 
             allowed: false, 
             error: isPaid 
-                ? "Daily screenshot limit (10) reached." 
-                : "Free daily screenshot limit (3) reached." 
+                ? `Daily screenshot limit (${limit}) reached.` 
+                : `Free daily screenshot limit (${limit}) reached.` 
         };
     }
 
-    // Increment
     user.screenshotUsage.count += 1;
     await user.save();
     
@@ -321,37 +317,35 @@ async function getPayPalAccessToken() {
 
 app.get("/ping", (req, res) => res.send("pong"));
 
-// 0. CONFIG ROUTE - Sends Pricing + Client ID to UI
+// 0. CONFIG ROUTE - Sends Pricing + Client ID + LIMITS to UI
 app.get("/api/config", (req, res) => {
     res.json({
         pricing: PRICING,
         googleClientId: GOOGLE_CLIENT_ID,
-        websitePricingUrl: WEBSITE_PRICING_URL 
+        websitePricingUrl: WEBSITE_PRICING_URL,
+        limits: {
+            freeChat: FREE_DAILY_LIMIT,
+            freeScreenshot: FREE_SCREENSHOT_LIMIT,
+            paidScreenshot: PAID_SCREENSHOT_LIMIT
+        }
     });
 });
 
-// 1. AUTH - UPDATED FOR SECURE CODE EXCHANGE
+// 1. AUTH
 app.post("/api/auth/google", async (req, res) => {
   try {
-    // We now expect 'code' from the frontend (Secure Flow)
-    // Or 'token'/'tokens' for backward compatibility if needed
     const { code, token, tokens } = req.body;
-
     let idToken = token || (tokens && tokens.id_token);
     let accessToken = tokens && tokens.access_token;
 
-    // --- NEW: Secure Server-Side Exchange ---
     if (code) {
         if (!GOOGLE_CLIENT_SECRET) {
-            console.error("Missing GOOGLE_CLIENT_SECRET on Backend");
             return res.status(500).json({ error: "Server misconfiguration" });
         }
-
         const params = new URLSearchParams();
         params.append("code", code);
         params.append("client_id", GOOGLE_CLIENT_ID);
         params.append("client_secret", GOOGLE_CLIENT_SECRET);
-        // Important: This must match the URI used in Electron exactly
         params.append("redirect_uri", GOOGLE_REDIRECT_URI); 
         params.append("grant_type", "authorization_code");
 
@@ -362,18 +356,13 @@ app.post("/api/auth/google", async (req, res) => {
         });
 
         const exchangeData = await exchangeRes.json();
-        if (!exchangeRes.ok) {
-            console.error("Google Token Exchange Failed:", exchangeData);
-            return res.status(401).json({ error: "Failed to exchange code" });
-        }
-
+        if (!exchangeRes.ok) return res.status(401).json({ error: "Failed to exchange code" });
         idToken = exchangeData.id_token;
         accessToken = exchangeData.access_token;
     }
 
     if (!idToken) return res.status(400).json({ error: "No authentication credential provided" });
 
-    // Validate and Get Profile
     const googleRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${idToken}`);
     if (!googleRes.ok) return res.status(401).json({ error: "Invalid Google Token" });
 
@@ -393,7 +382,6 @@ app.post("/api/auth/google", async (req, res) => {
       { new: true, upsert: true }
     );
     
-    // Return the user AND the tokens so Electron can save the session
     res.json({ success: true, user, tokens: { id_token: idToken, access_token: accessToken } });
   } catch (err) {
     console.error("Auth Error:", err);
@@ -421,7 +409,7 @@ app.get("/api/user/status", async (req, res) => {
       tier: user.subscription.tier,
       validUntil: user.subscription.validUntil,
       freeUsage: user.freeUsage,
-      screenshotUsage: user.screenshotUsage, // Send screenshot stats
+      screenshotUsage: user.screenshotUsage, 
       orders: user.orders ? user.orders.sort((a,b) => new Date(b.date) - new Date(a.date)) : []
     });
   } catch (err) {
@@ -435,8 +423,6 @@ app.post("/api/payment/create-order", async (req, res) => {
     const { googleId, tier, cycle } = req.body; 
     const user = await User.findOne({ googleId });
     if (!user) return res.status(404).json({ error: "User not found" });
-
-    console.log(`[Order] User: ${googleId} | Req Tier: ${tier} | Req Cycle: ${cycle}`);
 
     let priceInfo;
     let basePrice = 0.00;
@@ -453,8 +439,6 @@ app.post("/api/payment/create-order", async (req, res) => {
 
     const discountAmount = (basePrice * priceInfo.discount) / 100;
     let finalAmount = basePrice - discountAmount;
-     
-    console.log(`[Calc] Base: ${basePrice} | Discount: ${discountAmount} | Subtotal: ${finalAmount}`);
 
     let isUpgrade = false;
     let oldPlanCredit = 0.00;
@@ -474,17 +458,12 @@ app.post("/api/payment/create-order", async (req, res) => {
 
         const oldDiscountAmount = (oldBasePrice * PRICING.pro.discount) / 100;
         oldPlanCredit = oldBasePrice - oldDiscountAmount;
-
-        console.log(`[Upgrade] Subtracting Old Credit (Discounted): ${oldPlanCredit}`);
         finalAmount = finalAmount - oldPlanCredit;
     }
 
     if (finalAmount < 0) finalAmount = 0;
     finalAmount = Math.floor(finalAmount);
-     
     const amountInPaise = finalAmount * 100; 
-
-    console.log(`[Final] Amount to Charge: ${finalAmount}`);
 
     const receiptId = `rcpt_${Date.now()}`;
     const options = { 
@@ -557,14 +536,13 @@ app.post("/api/payment/verify", async (req, res) => {
   }
 });
 
-// 3.1. NEW PAYMENT ROUTES (PAYPAL) - FIXED WITH NO_SHIPPING
+// 3.1. NEW PAYMENT ROUTES (PAYPAL)
 app.post("/api/payment/create-paypal-order", async (req, res) => {
   try {
     const { googleId, tier, cycle } = req.body;
     const user = await User.findOne({ googleId });
     if (!user) return res.status(404).json({ error: "User not found" });
 
-    // --- DUPLICATE PRICING LOGIC ---
     let priceInfo;
     let basePrice = 0.00;
 
@@ -603,8 +581,6 @@ app.post("/api/payment/create-paypal-order", async (req, res) => {
     let finalAmountUSD = (finalAmountINR * INR_TO_USD_RATE).toFixed(2);
     if(finalAmountUSD < 0.1) finalAmountUSD = "0.10"; 
 
-    console.log(`[PayPal] INR: ${finalAmountINR} -> USD: ${finalAmountUSD}`);
-
     const accessToken = await getPayPalAccessToken();
     const orderRes = await fetch(`${PAYPAL_BASE_URL}/v2/checkout/orders`, {
         method: "POST",
@@ -618,7 +594,6 @@ app.post("/api/payment/create-paypal-order", async (req, res) => {
                 amount: { currency_code: "USD", value: finalAmountUSD },
                 description: `${tier.toUpperCase()} Plan (${cycle})`
             }],
-            // --- FIX: TELL PAYPAL THIS IS A DIGITAL GOOD ---
             application_context: {
                 shipping_preference: "NO_SHIPPING", 
                 user_action: "PAY_NOW",
@@ -628,14 +603,11 @@ app.post("/api/payment/create-paypal-order", async (req, res) => {
     });
 
     const orderData = await orderRes.json();
-     
-    // --- BETTER ERROR LOGGING ---
     if (!orderRes.ok || !orderData.id) {
-        console.error("❌ PayPal Order Failed. Response from PayPal:", JSON.stringify(orderData, null, 2));
+        console.error("❌ PayPal Order Failed:", JSON.stringify(orderData, null, 2));
         throw new Error("Failed to create PayPal Order");
     }
 
-    // Save initial order info to DB
     user.orders.push({
         orderId: orderData.id,
         amount: parseFloat(finalAmountUSD), 
@@ -668,8 +640,6 @@ app.post("/api/payment/verify-paypal", async (req, res) => {
       if (!dbOrder) return res.status(404).json({ error: "Order record not found" });
 
       const accessToken = await getPayPalAccessToken();
-      
-      // CAPTURE THE PAYMENT
       const captureRes = await fetch(`${PAYPAL_BASE_URL}/v2/checkout/orders/${orderID}/capture`, {
           method: "POST",
           headers: {
@@ -680,7 +650,6 @@ app.post("/api/payment/verify-paypal", async (req, res) => {
       
       const captureData = await captureRes.json();
       
-      // Check if Completed
       if (captureData.status === "COMPLETED") {
           dbOrder.status = "paid";
           dbOrder.paymentId = captureData.purchase_units[0].payments.captures[0].id;
@@ -695,7 +664,6 @@ app.post("/api/payment/verify-paypal", async (req, res) => {
           await user.save();
           res.json({ success: true });
       } else {
-          console.error("PayPal Capture Failed:", captureData);
           res.status(400).json({ success: false, error: "Payment not completed" });
       }
 
@@ -709,7 +677,7 @@ app.post("/api/payment/verify-paypal", async (req, res) => {
 app.post("/api/chat-stream", async (req, res) => {
   const googleId = req.headers["x-google-id"];
    
-  // 1. General Access Check
+  // 1. General Access Check (Uses Env Variable now)
   if (googleId) {
     const check = await checkAndIncrementUsage(googleId);
     if (!check.allowed) return res.status(403).json({ error: "Limit reached" });
@@ -718,7 +686,7 @@ app.post("/api/chat-stream", async (req, res) => {
   const { conversationId, message } = req.body || {};
   if (!message || !message.role) return res.status(400).json({ error: "Invalid Body" });
 
-  // 2. NEW: Screenshot Specific Limit Check
+  // 2. Screenshot Specific Limit Check (Uses Env Variables)
   if (message.screenshot && googleId) {
       const screenCheck = await checkScreenshotLimit(googleId);
       if (!screenCheck.allowed) {
@@ -803,8 +771,7 @@ app.post("/api/chat-stream", async (req, res) => {
 // 6. TRANSCRIPTION
 app.post("/api/transcribe", upload.single("file"), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: "Missing file or file too large (Max 5MB)" });
-     
+    if (!req.file) return res.status(400).json({ error: "Missing file" });
     const mime = req.file.mimetype || "audio/webm";
     const filename = req.file.originalname || "audio.webm";
     const formData = new FormData();
@@ -817,13 +784,10 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
         headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
         body: formData
     });
-      
     const data = await openaiRes.json();
     if (!openaiRes.ok) throw new Error(data.error?.message || "OpenAI Error");
-
     res.json({ text: data.text || "" });
   } catch (err) {
-    console.error("❌ [TRANSCRIPTION] Error:", err.message);
     res.status(500).json({ error: "Transcription failed" });
   }
 });
