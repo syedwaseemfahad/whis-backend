@@ -1,3 +1,4 @@
+/* server.js */
 require("dotenv").config();
 
 const express = require("express");
@@ -121,6 +122,11 @@ const userSchema = new mongoose.Schema({
     validUntil: Date
   },
   freeUsage: {
+    count: { type: Number, default: 0 },
+    lastDate: { type: String }
+  },
+  // --- NEW: Screenshot Usage Tracker ---
+  screenshotUsage: {
     count: { type: Number, default: 0 },
     lastDate: { type: String }
   },
@@ -252,6 +258,44 @@ async function checkAndIncrementUsage(googleId) {
   return { allowed: true, tier: 'free', remaining: 10 - user.freeUsage.count };
 }
 
+// --- NEW HELPER: Screenshot Limit Check ---
+async function checkScreenshotLimit(googleId) {
+    const today = new Date().toISOString().slice(0, 10);
+    const user = await User.findOne({ googleId });
+    if (!user) return { allowed: false, error: "User not found" };
+
+    // Initialize if missing (backward compatibility)
+    if (!user.screenshotUsage) {
+        user.screenshotUsage = { count: 0, lastDate: today };
+    }
+
+    // Reset daily counter
+    if (user.screenshotUsage.lastDate !== today) {
+        user.screenshotUsage.count = 0;
+        user.screenshotUsage.lastDate = today;
+    }
+
+    // Determine Limit based on Subscription
+    const isPaid = user.subscription.status === 'active' && ['pro', 'pro_plus'].includes(user.subscription.tier);
+    // LIMITS: Paid = 10, Free = 3
+    const limit = isPaid ? 10 : 3;
+
+    if (user.screenshotUsage.count >= limit) {
+        return { 
+            allowed: false, 
+            error: isPaid 
+                ? "Daily screenshot limit (10) reached." 
+                : "Free daily screenshot limit (3) reached." 
+        };
+    }
+
+    // Increment
+    user.screenshotUsage.count += 1;
+    await user.save();
+    
+    return { allowed: true, count: user.screenshotUsage.count, limit };
+}
+
 // --- HELPER: PayPal Token ---
 async function getPayPalAccessToken() {
     if (!PAYPAL_CLIENT_ID || !PAYPAL_CLIENT_SECRET) {
@@ -342,7 +386,8 @@ app.post("/api/auth/google", async (req, res) => {
         email, name, avatarUrl, lastLogin: new Date(),
         $setOnInsert: {
           "subscription.status": "inactive", "subscription.tier": "free",
-          "freeUsage.count": 0, "freeUsage.lastDate": new Date().toISOString().slice(0, 10)
+          "freeUsage.count": 0, "freeUsage.lastDate": new Date().toISOString().slice(0, 10),
+          "screenshotUsage.count": 0, "screenshotUsage.lastDate": new Date().toISOString().slice(0, 10)
         }
       },
       { new: true, upsert: true }
@@ -376,6 +421,7 @@ app.get("/api/user/status", async (req, res) => {
       tier: user.subscription.tier,
       validUntil: user.subscription.validUntil,
       freeUsage: user.freeUsage,
+      screenshotUsage: user.screenshotUsage, // Send screenshot stats
       orders: user.orders ? user.orders.sort((a,b) => new Date(b.date) - new Date(a.date)) : []
     });
   } catch (err) {
@@ -663,6 +709,7 @@ app.post("/api/payment/verify-paypal", async (req, res) => {
 app.post("/api/chat-stream", async (req, res) => {
   const googleId = req.headers["x-google-id"];
    
+  // 1. General Access Check
   if (googleId) {
     const check = await checkAndIncrementUsage(googleId);
     if (!check.allowed) return res.status(403).json({ error: "Limit reached" });
@@ -670,6 +717,14 @@ app.post("/api/chat-stream", async (req, res) => {
 
   const { conversationId, message } = req.body || {};
   if (!message || !message.role) return res.status(400).json({ error: "Invalid Body" });
+
+  // 2. NEW: Screenshot Specific Limit Check
+  if (message.screenshot && googleId) {
+      const screenCheck = await checkScreenshotLimit(googleId);
+      if (!screenCheck.allowed) {
+          return res.status(403).json({ error: screenCheck.error });
+      }
+  }
 
   const convId = conversationId || `conv_${Date.now()}`;
 
