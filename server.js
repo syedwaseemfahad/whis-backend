@@ -461,7 +461,8 @@ app.post("/api/user/trial/start", async (req, res) => {
     }
 });
 
-// === NEW: END TRIAL IMMEDIATELY ===
+
+// === NEW: MANUALLY END TRIAL ===
 app.post("/api/user/trial/end", async (req, res) => {
     try {
         const googleId = req.headers["x-google-id"];
@@ -470,23 +471,22 @@ app.post("/api/user/trial/end", async (req, res) => {
         const user = await User.findOne({ googleId });
         if (!user) return res.status(404).json({ error: "User not found" });
 
+        // Only end if currently in a trial
         if (user.subscription.isTrial && user.subscription.status === 'active') {
-             // Set validUntil to the past to expire it immediately
-             user.subscription.validUntil = new Date(Date.now() - 1000); 
-             // We let the status checker handle changing 'active' to 'inactive' 
-             // or we can force it here:
-             user.subscription.status = "inactive";
-             user.subscription.tier = "free";
-             user.subscription.isTrial = false;
-
-             await user.save();
-             return res.json({ success: true, message: "Trial ended." });
+            user.subscription.status = 'inactive';
+            // Set expiry to now to invalidate it immediately
+            user.subscription.validUntil = new Date(); 
+            user.subscription.tier = 'free'; 
+            user.subscription.isTrial = false;
+            
+            await user.save();
+            console.log(`[Trial] User ${user.email} ended trial early.`);
+            return res.json({ success: true });
         }
 
-        res.json({ success: false, message: "No active trial to end." });
-
+        return res.json({ success: false, message: "Not in an active trial" });
     } catch (err) {
-        console.error("Trial End Error:", err);
+        console.error("End Trial Error:", err);
         res.status(500).json({ error: "Failed to end trial" });
     }
 });
