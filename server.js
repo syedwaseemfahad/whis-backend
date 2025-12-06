@@ -447,19 +447,14 @@ app.get("/api/user/status", async (req, res) => {
       validUntil: user.subscription.validUntil,
       freeUsage: user.freeUsage,
       screenshotUsage: user.screenshotUsage, 
-      orders: user.orders ? user.orders.sort((a,b) => new Date(b.date) - new Date(a.date)) : [],
-      // NEW: Send contexts back (optional, but good for sync)
-      contexts: user.contexts || [] 
+      orders: user.orders ? user.orders.sort((a,b) => new Date(b.date) - new Date(a.date)) : []
     });
   } catch (err) {
     res.status(500).json({ error: "Failed to check status" });
   }
 });
 
-
-// ==========================================
-// --- NEW: CONTEXT MANAGEMENT ENDPOINTS ---
-// ==========================================
+// === NEW: CONTEXT API ENDPOINTS ===
 
 // Get all contexts
 app.get("/api/user/context", async (req, res) => {
@@ -565,10 +560,6 @@ app.delete("/api/user/context/:id", async (req, res) => {
   }
 });
 
-
-// ==========================================
-// --- PAYMENT ENDPOINTS (Unchanged) ---
-// ==========================================
 
 app.post("/api/payment/create-order", async (req, res) => {
   try {
@@ -844,7 +835,7 @@ app.post("/api/chat-stream", async (req, res) => {
       }
   }
 
-  // --- NEW: FETCH ACTIVE CONTEXT ---
+  // --- 1. FETCH ACTIVE CONTEXT ---
   let systemContextMessage = null;
   if (googleId) {
      const user = await User.findOne({ googleId }, { contexts: 1 });
@@ -858,7 +849,6 @@ app.post("/api/chat-stream", async (req, res) => {
          }
      }
   }
-  // ---------------------------------
 
   const convId = conversationId || `conv_${Date.now()}`;
 
@@ -901,11 +891,28 @@ app.post("/api/chat-stream", async (req, res) => {
         return { role: msg.role, content: msg.content };
     });
 
-    // --- INJECT CONTEXT ---
+    // --- 2. INJECT INTERVIEW PERSONA & CONTEXT ---
+    const interviewSystemMsg = {
+        role: "system",
+        content: `You are an expert technical candidate in a high-stakes job interview. 
+        Your goal is to provide the BEST POSSIBLE answer that ensures interview success.
+        
+        GUIDELINES:
+        1. **Mode**: Answer as if YOU are the candidate.
+        2. **Structure**: Summarize key points first. Be concise. The user needs to read this quickly and explain it verbally.
+        3. **Sequence**: For technical questions, explain steps in the exact order an interviewer expects (e.g., Naive -> Optimized).
+        4. **Clarity**: Make it easily understandable. Remove filler words.`
+    };
+    
+    // Unshift order: Last unshifted becomes first.
+    // We want: [Interview Persona, Context, ...User History]
+    
+    // Add Context First (so it is pushed down by Persona)
     if (systemContextMessage) {
         processedHistory.unshift(systemContextMessage);
     }
-    // ---------------------
+    // Add Persona (so it stays at top)
+    processedHistory.unshift(interviewSystemMsg);
 
     res.setHeader("x-conversation-id", convId);
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
