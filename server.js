@@ -39,7 +39,6 @@ const PAYPAL_BASE_URL = process.env.PAYPAL_MODE === 'sandbox' ? "https://api-m.s
 const INR_TO_USD_RATE = 0.012; 
 
 // --- LIMITS & TRIAL CONFIGURATION ---
-// STRICT INTEGER PARSING
 const FREE_DAILY_LIMIT = parseInt(process.env.FREE_DAILY_LIMIT || "10", 10);
 const FREE_SCREENSHOT_LIMIT = parseInt(process.env.FREE_SCREENSHOT_LIMIT || "3", 10);
 const PAID_SCREENSHOT_LIMIT = parseInt(process.env.PAID_SCREENSHOT_LIMIT || "10", 10);
@@ -238,17 +237,16 @@ app.use((req, res, next) => {
 
 app.use(express.static(__dirname));
 
-// === CRITICAL: ATOMIC USAGE CHECKER & INCREMENTER ===
+// === CRITICAL: ATOMIC USAGE CHECKER ===
 async function checkAndIncrementUsage(googleId) {
   const today = new Date().toISOString().slice(0, 10);
   
-  // 1. Fetch User Data First (For Status Check)
+  // 1. Fetch User Data
   let user = await User.findOne({ googleId });
   if (!user) return { allowed: false, error: "User not found" };
 
-  // 2. Perform Daily Reset Check
+  // 2. Daily Reset - Atomic Operation
   if (user.freeUsage.lastDate !== today) {
-      // Atomic Reset
       user = await User.findOneAndUpdate(
           { googleId },
           { 
@@ -278,7 +276,7 @@ async function checkAndIncrementUsage(googleId) {
           }
       });
       isPaidActive = false;
-      isTrialActive = false; // ensure this is false too
+      isTrialActive = false;
   }
 
   // If Premium or Valid Trial -> Allow (No increment of free counter)
@@ -287,8 +285,8 @@ async function checkAndIncrementUsage(googleId) {
   }
 
   // 4. Free Tier - ATOMIC INCREMENT
-  // This query is the fail-safe. It ONLY updates if count < LIMIT.
-  // It returns NULL if count >= LIMIT, preventing the "15 responses" issue.
+  // This is the CRITICAL FIX. The query strictly requires count < LIMIT.
+  // It increments and returns the new document ONLY if condition met.
   const result = await User.findOneAndUpdate(
       { 
           googleId: googleId, 
@@ -301,12 +299,6 @@ async function checkAndIncrementUsage(googleId) {
   if (result) {
       return { allowed: true, tier: 'free', remaining: FREE_DAILY_LIMIT - result.freeUsage.count };
   } else {
-      // Double check strictly to confirm it wasn't a DB error
-      const strictCheck = await User.findOne({ googleId });
-      if(strictCheck && strictCheck.freeUsage.count >= FREE_DAILY_LIMIT) {
-          return { allowed: false, error: "Daily limit reached" };
-      }
-      // Fallback allowed:false just in case
       return { allowed: false, error: "Daily limit reached" };
   }
 }
@@ -321,8 +313,8 @@ async function checkScreenshotLimit(googleId) {
         user.screenshotUsage = { count: 0, lastDate: today };
     }
 
+    // Daily Reset check handled in usage check, but good to be safe
     if (user.screenshotUsage.lastDate !== today) {
-        // Reset Logic handled in checkAndIncrementUsage mostly, but just in case
         user.screenshotUsage.count = 0;
         user.screenshotUsage.lastDate = today;
         await user.save();
@@ -465,7 +457,7 @@ app.post("/api/auth/google", async (req, res) => {
 app.post("/api/user/trial/start", async (req, res) => {
     try {
         const googleId = req.headers["x-google-id"];
-        const { tier } = req.body; // Expects 'pro' or 'pro_plus'
+        const { tier } = req.body; 
         
         if (!googleId) return res.status(401).json({ error: "Unauthorized" });
         if (!['pro', 'pro_plus'].includes(tier)) return res.status(400).json({ error: "Invalid tier" });
@@ -473,21 +465,18 @@ app.post("/api/user/trial/start", async (req, res) => {
         const user = await User.findOne({ googleId });
         if (!user) return res.status(404).json({ error: "User not found" });
 
-        // Check limits
         if (user.trialUsage && user.trialUsage.count >= MAX_TRIAL_SESSIONS) {
             return res.status(403).json({ error: "Maximum trial sessions reached." });
         }
 
-        // Apply Trial
         const now = new Date();
-        const expiry = new Date(now.getTime() + (TRIAL_DURATION_MINUTES * 60 * 1000)); // 10 minutes from now
+        const expiry = new Date(now.getTime() + (TRIAL_DURATION_MINUTES * 60 * 1000)); 
 
-        // --- FIX: DO NOT SET STATUS ACTIVE IN DB to keep Website pricing visible ---
+        // Set Trial Flags but NOT status='active' (to keep website pricing visible)
         user.subscription.tier = tier;
         user.subscription.validUntil = expiry;
         user.subscription.isTrial = true; 
 
-        // Increment count
         if (!user.trialUsage) user.trialUsage = { count: 0 };
         user.trialUsage.count += 1;
 
@@ -518,9 +507,7 @@ app.post("/api/user/trial/end", async (req, res) => {
         const user = await User.findOne({ googleId });
         if (!user) return res.status(404).json({ error: "User not found" });
 
-        // Only end if currently in a trial
         if (user.subscription.isTrial) {
-            // Expire immediately
             user.subscription.validUntil = new Date(); 
             user.subscription.tier = 'free'; 
             user.subscription.isTrial = false;
@@ -585,7 +572,6 @@ app.get("/api/user/status", async (req, res) => {
       await user.save();
     }
     
-    // --- TRIAL VISIBILITY LOGIC ---
     const isRealActive = user.subscription.status === "active";
     const isTrialValid = user.subscription.isTrial && user.subscription.validUntil && now < user.subscription.validUntil;
 
@@ -968,10 +954,23 @@ app.post("/api/payment/verify-paypal", async (req, res) => {
 
 app.post("/api/chat-stream", async (req, res) => {
   const googleId = req.headers["x-google-id"];
+  
+  // === CRITICAL SECURITY FIX ===
+  // Do not allow requests without googleId to bypass limits.
+  if (!googleId) {
+      return res.status(401).json({ error: "Unauthorized: Missing Google ID" });
+  }
    
-  if (googleId) {
-    const check = await checkAndIncrementUsage(googleId);
-    if (!check.allowed) return res.status(403).json({ error: "Limit reached" });
+  const check = await checkAndIncrementUsage(googleId);
+  if (!check.allowed) {
+      // Add a header so client can see specific failure reason if needed
+      res.setHeader("x-limit-reached", "true");
+      return res.status(403).json({ error: "Limit reached" });
+  }
+  
+  // Add header for Remaining Count so client can sync
+  if(check.remaining !== undefined) {
+      res.setHeader("x-remaining-free", check.remaining.toString());
   }
 
   const { conversationId, message } = req.body || {};
