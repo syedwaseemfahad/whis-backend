@@ -118,7 +118,7 @@ const userSchema = new mongoose.Schema({
   name: String,
   avatarUrl: String,
   phone: String,
-  // NEW: Session Control Field
+  // Session Control
   currentSessionId: { type: String, default: "" },
   subscription: {
     status: { type: String, enum: ["active", "inactive", "past_due"], default: "inactive" },
@@ -215,10 +215,8 @@ app.use((req, res, next) => {
   next();
 });
 
-// Serve Static Files
 app.use(express.static(__dirname));
 
-// --- HELPER: Usage Check (Chat Limit) ---
 async function checkAndIncrementUsage(googleId) {
   const today = new Date().toISOString().slice(0, 10);
   const user = await User.findOne({ googleId });
@@ -256,7 +254,6 @@ async function checkAndIncrementUsage(googleId) {
   return { allowed: true, tier: 'free', remaining: FREE_DAILY_LIMIT - user.freeUsage.count };
 }
 
-// --- HELPER: Screenshot Limit Check ---
 async function checkScreenshotLimit(googleId) {
     const today = new Date().toISOString().slice(0, 10);
     const user = await User.findOne({ googleId });
@@ -289,7 +286,6 @@ async function checkScreenshotLimit(googleId) {
     return { allowed: true, count: user.screenshotUsage.count, limit };
 }
 
-// --- HELPER: PayPal Token ---
 async function getPayPalAccessToken() {
     if (!PAYPAL_CLIENT_ID || !PAYPAL_CLIENT_SECRET) {
         throw new Error("Missing PayPal Credentials");
@@ -314,7 +310,6 @@ async function getPayPalAccessToken() {
 
 app.get("/ping", (req, res) => res.send("pong"));
 
-// 0. CONFIG ROUTE
 app.get("/api/config", (req, res) => {
     res.json({
         pricing: PRICING,
@@ -329,7 +324,6 @@ app.get("/api/config", (req, res) => {
     });
 });
 
-// 1. AUTH - UPDATED WITH SESSION ID
 app.post("/api/auth/google", async (req, res) => {
   try {
     const { code, token, tokens } = req.body;
@@ -367,14 +361,12 @@ app.post("/api/auth/google", async (req, res) => {
     const payload = await googleRes.json();
     const { sub: googleId, email, name, picture: avatarUrl } = payload;
 
-    // NEW: Generate a unique session ID for THIS login
     const newSessionId = crypto.randomUUID();
 
     const user = await User.findOneAndUpdate(
       { googleId },
       {
         email, name, avatarUrl, lastLogin: new Date(),
-        // IMPORTANT: Update session ID in DB
         currentSessionId: newSessionId,
         $setOnInsert: {
           "subscription.status": "inactive", "subscription.tier": "free",
@@ -392,11 +384,33 @@ app.post("/api/auth/google", async (req, res) => {
   }
 });
 
-// 2. USER STATUS - UPDATED WITH SESSION CHECK
+// === NEW: Session Rotation Endpoint ===
+app.post("/api/auth/session/rotate", async (req, res) => {
+    try {
+        const googleId = req.headers["x-google-id"];
+        if(!googleId) return res.status(400).json({ error: "Missing ID" });
+
+        // Generate new session
+        const newSessionId = crypto.randomUUID();
+        
+        // Update DB
+        await User.findOneAndUpdate(
+            { googleId },
+            { currentSessionId: newSessionId }
+        );
+
+        console.log(`[Session] Rotated session for ${googleId}`);
+        res.json({ success: true, newSessionId });
+    } catch(err) {
+        console.error("Rotation error:", err);
+        res.status(500).json({ error: "Rotation failed" });
+    }
+});
+
+
 app.get("/api/user/status", async (req, res) => {
   try {
     const googleId = req.headers["x-google-id"];
-    // NEW: Receive Session ID
     const incomingSessionId = req.headers["x-session-id"];
     
     if (!googleId) return res.status(401).json({ error: "Not authenticated" });
@@ -404,10 +418,9 @@ app.get("/api/user/status", async (req, res) => {
     const user = await User.findOne({ googleId });
     if (!user) return res.json({ active: false, tier: null });
 
-    // NEW: Check for Duplicate Session
-    // If DB has a session ID, and incoming one is different, it's an old/duplicate session.
+    // Session Mismatch Check
     if (user.currentSessionId && incomingSessionId && user.currentSessionId !== incomingSessionId) {
-        console.log(`[Security] Session Mismatch for ${user.email}. Closing old session.`);
+        console.log(`[Security] Session Mismatch for ${user.email}. DB: ${user.currentSessionId} vs Incoming: ${incomingSessionId}`);
         return res.json({ sessionInvalid: true });
     }
 
@@ -430,8 +443,6 @@ app.get("/api/user/status", async (req, res) => {
   }
 });
 
-// ... (Rest of the file remains exactly the same: Payment routes, Chat stream, etc.) ...
-// 3. PAYMENT ROUTES (RAZORPAY)
 app.post("/api/payment/create-order", async (req, res) => {
   try {
     const { googleId, tier, cycle } = req.body; 
@@ -550,7 +561,6 @@ app.post("/api/payment/verify", async (req, res) => {
   }
 });
 
-// 3.1. NEW PAYMENT ROUTES (PAYPAL)
 app.post("/api/payment/create-paypal-order", async (req, res) => {
   try {
     const { googleId, tier, cycle } = req.body;
@@ -573,7 +583,6 @@ app.post("/api/payment/create-paypal-order", async (req, res) => {
     const discountAmount = (basePrice * priceInfo.discount) / 100;
     let finalAmountINR = basePrice - discountAmount;
 
-    // Check Upgrade logic
     let isUpgrade = false;
     let oldPlanCredit = 0.00;
 
@@ -591,7 +600,6 @@ app.post("/api/payment/create-paypal-order", async (req, res) => {
     if (finalAmountINR < 0) finalAmountINR = 0;
     finalAmountINR = Math.floor(finalAmountINR);
 
-    // --- CONVERT TO USD ---
     let finalAmountUSD = (finalAmountINR * INR_TO_USD_RATE).toFixed(2);
     if(finalAmountUSD < 0.1) finalAmountUSD = "0.10"; 
 
@@ -687,11 +695,9 @@ app.post("/api/payment/verify-paypal", async (req, res) => {
   }
 });
 
-// 5. STREAM CHAT
 app.post("/api/chat-stream", async (req, res) => {
   const googleId = req.headers["x-google-id"];
    
-  // 1. General Access Check (Uses Env Variable now)
   if (googleId) {
     const check = await checkAndIncrementUsage(googleId);
     if (!check.allowed) return res.status(403).json({ error: "Limit reached" });
@@ -700,13 +706,10 @@ app.post("/api/chat-stream", async (req, res) => {
   const { conversationId, message } = req.body || {};
   if (!message || !message.role) return res.status(400).json({ error: "Invalid Body" });
 
-  // --- NEW: Backend Truncation Logic (Failsafe) ---
   if (message.content && message.content.length > MAX_TEXT_CHAR_LIMIT) {
-      // Instead of rejecting, slice it (matching behavior requested)
       message.content = message.content.slice(-MAX_TEXT_CHAR_LIMIT);
   }
 
-  // 2. Screenshot Specific Limit Check (Uses Env Variables)
   if (message.screenshot && googleId) {
       const screenCheck = await checkScreenshotLimit(googleId);
       if (!screenCheck.allowed) {
@@ -738,7 +741,6 @@ app.post("/api/chat-stream", async (req, res) => {
       { new: true, upsert: true }
     );
     
-    // OPTIMIZATION: Only send context of last 10 messages and strip old images
     const CONTEXT_WINDOW_SIZE = 10;
     const rawHistory = conversation.messages.slice(-CONTEXT_WINDOW_SIZE);
 
@@ -804,7 +806,6 @@ app.post("/api/chat-stream", async (req, res) => {
   }
 });
 
-// 6. TRANSCRIPTION
 app.post("/api/transcribe", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "Missing file" });
@@ -828,7 +829,6 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
   }
 });
 
-// --- NEW ROUTE: Draft Transcription ---
 app.post("/api/transcribe-draft", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "Missing file" });
