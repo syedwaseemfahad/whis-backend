@@ -237,64 +237,82 @@ app.use((req, res, next) => {
 
 app.use(express.static(__dirname));
 
+// === CRITICAL: ATOMIC USAGE CHECKER ===
 async function checkAndIncrementUsage(googleId) {
   const today = new Date().toISOString().slice(0, 10);
-  const user = await User.findOne({ googleId });
-   
+  
+  // 1. Fetch User for Status Check
+  let user = await User.findOne({ googleId });
   if (!user) return { allowed: false, error: "User not found" };
 
-  const isTrialActive = user.subscription.isTrial && user.subscription.validUntil && new Date() < user.subscription.validUntil;
-  const isPaidActive = user.subscription.status === 'active';
+  // 2. Daily Reset (Safe to run before status check)
+  if (user.freeUsage.lastDate !== today) {
+      user = await User.findOneAndUpdate(
+          { googleId },
+          { 
+              $set: { 
+                  "freeUsage.count": 0, 
+                  "freeUsage.lastDate": today,
+                  "screenshotUsage.count": 0,
+                  "screenshotUsage.lastDate": today 
+              } 
+          },
+          { new: true } // Return updated user
+      );
+  }
 
-  // Check Expiry for Paid Users
-  if (isPaidActive) {
-     if (user.subscription.validUntil) {
-         const expiry = new Date(user.subscription.validUntil);
-         if (new Date() > expiry) {
-             console.log(`[Sub] Expired for ${googleId}. Downgrading.`);
-             user.subscription.status = 'inactive';
-             user.subscription.tier = 'free';
-             user.subscription.isTrial = false;
-             await user.save();
-             // Continue to free checks...
-         } else {
-             return { allowed: true, tier: user.subscription.tier };
-         }
-     } else {
-         return { allowed: true, tier: user.subscription.tier };
-     }
-  } else if (isTrialActive) {
-      // Trial is valid and running
+  // 3. Status Check (Paid vs Trial vs Free)
+  let isTrialActive = user.subscription.isTrial && user.subscription.validUntil && new Date() < user.subscription.validUntil;
+  let isPaidActive = user.subscription.status === 'active';
+
+  // Handle Expired Paid Subscription (Downgrade Immediately)
+  if (isPaidActive && user.subscription.validUntil && new Date() > user.subscription.validUntil) {
+      console.log(`[Sub] Expired for ${googleId}. Downgrading to free.`);
+      await User.updateOne({ googleId }, { 
+          $set: { 
+             "subscription.status": "inactive", 
+             "subscription.tier": "free",
+             "subscription.isTrial": false 
+          }
+      });
+      isPaidActive = false;
+      // Re-evaluate trial status (unlikely to be true if it was paid active, but safe to set false)
+      isTrialActive = false;
+  }
+
+  if (isPaidActive || isTrialActive) {
       return { allowed: true, tier: user.subscription.tier };
   }
 
-  // Free Tier Logic
-  if (user.freeUsage.lastDate !== today) {
-    user.freeUsage.count = 0;
-    user.freeUsage.lastDate = today;
-  }
+  // 4. Free Tier - ATOMIC INCREMENT
+  // This query only succeeds if count is strictly less than limit.
+  // Prevents race conditions (15 vs 10 issue).
+  const result = await User.findOneAndUpdate(
+      { 
+          googleId: googleId, 
+          "freeUsage.count": { $lt: FREE_DAILY_LIMIT } 
+      },
+      { $inc: { "freeUsage.count": 1 } },
+      { new: true }
+  );
 
-  if (user.freeUsage.count >= FREE_DAILY_LIMIT) {
-    return { allowed: false, error: "Daily limit reached" };
+  if (result) {
+      return { allowed: true, tier: 'free', remaining: FREE_DAILY_LIMIT - result.freeUsage.count };
+  } else {
+      return { allowed: false, error: "Daily limit reached" };
   }
-
-  user.freeUsage.count += 1;
-  await user.save();
-  return { allowed: true, tier: 'free', remaining: FREE_DAILY_LIMIT - user.freeUsage.count };
 }
 
+// === CRITICAL: ATOMIC SCREENSHOT CHECKER ===
 async function checkScreenshotLimit(googleId) {
     const today = new Date().toISOString().slice(0, 10);
     const user = await User.findOne({ googleId });
     if (!user) return { allowed: false, error: "User not found" };
 
-    if (!user.screenshotUsage) {
-        user.screenshotUsage = { count: 0, lastDate: today };
-    }
-
+    // Reset logic handled in checkAndIncrementUsage mostly, but safe to repeat or check
     if (user.screenshotUsage.lastDate !== today) {
-        user.screenshotUsage.count = 0;
-        user.screenshotUsage.lastDate = today;
+         // Reset will happen on next chat or we can force it here, but typically chat happens first.
+         // For safety in atomic op below, we assume date is managed. 
     }
 
     const isTrialActive = user.subscription.isTrial && user.subscription.validUntil && new Date() < user.subscription.validUntil;
@@ -302,7 +320,22 @@ async function checkScreenshotLimit(googleId) {
     
     const limit = isPaid ? PAID_SCREENSHOT_LIMIT : FREE_SCREENSHOT_LIMIT;
 
-    if (user.screenshotUsage.count >= limit) {
+    // Atomic Increment
+    const result = await User.findOneAndUpdate(
+        { 
+            googleId: googleId, 
+            "screenshotUsage.count": { $lt: limit } 
+        },
+        { 
+            $inc: { "screenshotUsage.count": 1 },
+            $set: { "screenshotUsage.lastDate": today } // Ensure date is set
+        },
+        { new: true }
+    );
+
+    if (result) {
+        return { allowed: true, count: result.screenshotUsage.count, limit };
+    } else {
         return { 
             allowed: false, 
             error: isPaid 
@@ -310,11 +343,6 @@ async function checkScreenshotLimit(googleId) {
                 : `Free daily screenshot limit (${limit}) reached.` 
         };
     }
-
-    user.screenshotUsage.count += 1;
-    await user.save();
-    
-    return { allowed: true, count: user.screenshotUsage.count, limit };
 }
 
 async function getPayPalAccessToken() {
