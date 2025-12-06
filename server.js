@@ -44,8 +44,8 @@ const FREE_SCREENSHOT_LIMIT = parseInt(process.env.FREE_SCREENSHOT_LIMIT || "3",
 const PAID_SCREENSHOT_LIMIT = parseInt(process.env.PAID_SCREENSHOT_LIMIT || "10", 10);
 const MAX_TEXT_CHAR_LIMIT = parseInt(process.env.MAX_TEXT_CHAR_LIMIT || "4096", 10);
 
-const MAX_TRIAL_SESSIONS = 3;
-const TRIAL_DURATION_MINUTES = 10;
+// --- MODIFIED: USE parseFloat FOR DECIMAL HOURS ---
+const FREE_TRIAL_HOURS = parseFloat(process.env.FREE_TRIAL_HOURS || "24");
 
 // --- PRICING CONFIGURATION ---
 const PRICING = {
@@ -63,8 +63,7 @@ const PRICING = {
 
 // --- INITIAL CHECKS ---
 console.log("--- 🚀 STARTING SERVER ---");
-console.log(`--- 📊 LIMITS: Free Chat=${FREE_DAILY_LIMIT}, Free SS=${FREE_SCREENSHOT_LIMIT}, Paid SS=${PAID_SCREENSHOT_LIMIT} ---`);
-console.log(`--- ⏳ TRIAL: ${MAX_TRIAL_SESSIONS} sessions of ${TRIAL_DURATION_MINUTES} mins each ---`);
+console.log(`--- 📊 LIMITS: Trial=${FREE_TRIAL_HOURS}h, Free Chat=${FREE_DAILY_LIMIT}, Free SS=${FREE_SCREENSHOT_LIMIT}, Paid SS=${PAID_SCREENSHOT_LIMIT} ---`);
 
 if (!OPENAI_API_KEY) console.error("⚠️  MISSING: OPENAI_API_KEY");
 if (!RAZORPAY_KEY_ID) console.error("⚠️  MISSING: RAZORPAY_KEY_ID");
@@ -122,16 +121,13 @@ const userSchema = new mongoose.Schema({
   name: String,
   avatarUrl: String,
   phone: String,
+  // Session Control
   currentSessionId: { type: String, default: "" },
   subscription: {
     status: { type: String, enum: ["active", "inactive", "past_due"], default: "inactive" },
     tier: { type: String, enum: ["free", "pro", "pro_plus"], default: "free" },
     cycle: { type: String, enum: ["monthly", "annual"], default: "monthly" },
     validUntil: Date
-  },
-  trialUsage: {
-      count: { type: Number, default: 0 },
-      lastUsed: Date
   },
   freeUsage: {
     count: { type: Number, default: 0 },
@@ -141,15 +137,17 @@ const userSchema = new mongoose.Schema({
     count: { type: Number, default: 0 },
     lastDate: { type: String }
   },
+  // --- CONTEXT FEATURE ---
   contexts: [
     {
-      id: { type: String, required: true },
-      name: { type: String, required: true },
+      id: { type: String, required: true }, // uuid
+      name: { type: String, required: true }, // e.g., "Resume", "Job Desc"
       content: { type: String, required: true },
       isActive: { type: Boolean, default: false },
       updatedAt: { type: Date, default: Date.now }
     }
   ],
+  // ---------------------------
   orders: [
     {
       orderId: String, paymentId: String, signature: String, amount: Number,
@@ -239,7 +237,6 @@ async function checkAndIncrementUsage(googleId) {
    
   if (!user) return { allowed: false, error: "User not found" };
 
-  // Check for Paid or Active Trial
   if (user.subscription.status === 'active' && ['pro', 'pro_plus'].includes(user.subscription.tier)) {
      if (user.subscription.validUntil) {
          const expiry = new Date(user.subscription.validUntil);
@@ -248,9 +245,7 @@ async function checkAndIncrementUsage(googleId) {
              console.log(`[Sub] Expired for ${googleId}. Downgrading.`);
              user.subscription.status = 'inactive';
              user.subscription.tier = 'free';
-             user.subscription.validUntil = null;
              await user.save();
-             // Falls through to Free logic below
          } else {
              return { allowed: true, tier: user.subscription.tier };
          }
@@ -259,12 +254,6 @@ async function checkAndIncrementUsage(googleId) {
      }
   }
 
-  // --- SAFEGUARD: Initialize freeUsage if missing ---
-  if (!user.freeUsage) {
-      user.freeUsage = { count: 0, lastDate: today };
-  }
-
-  // Check Daily Limit
   if (user.freeUsage.lastDate !== today) {
     user.freeUsage.count = 0;
     user.freeUsage.lastDate = today;
@@ -344,9 +333,7 @@ app.get("/api/config", (req, res) => {
             freeChat: FREE_DAILY_LIMIT,
             freeScreenshot: FREE_SCREENSHOT_LIMIT,
             paidScreenshot: PAID_SCREENSHOT_LIMIT,
-            maxTextChar: MAX_TEXT_CHAR_LIMIT,
-            maxTrialSessions: MAX_TRIAL_SESSIONS,
-            trialDurationMinutes: TRIAL_DURATION_MINUTES
+            maxTextChar: MAX_TEXT_CHAR_LIMIT
         }
     });
 });
@@ -390,18 +377,23 @@ app.post("/api/auth/google", async (req, res) => {
 
     const newSessionId = crypto.randomUUID();
 
+    // --- NEW: Calculate Trial Expiry with Decimal Hours ---
+    const trialEndTime = new Date(Date.now() + (FREE_TRIAL_HOURS * 60 * 60 * 1000));
+
     const user = await User.findOneAndUpdate(
       { googleId },
       {
         email, name, avatarUrl, lastLogin: new Date(),
         currentSessionId: newSessionId,
         $setOnInsert: {
-          "subscription.status": "inactive", // Default Inactive for new users
-          "subscription.tier": "free",
+          // Grant FREE TRIAL on creation
+          "subscription.status": "active", 
+          "subscription.tier": "pro_plus",
+          "subscription.cycle": "monthly", // Placeholder
+          "subscription.validUntil": trialEndTime,
           
           "freeUsage.count": 0, "freeUsage.lastDate": new Date().toISOString().slice(0, 10),
-          "screenshotUsage.count": 0, "screenshotUsage.lastDate": new Date().toISOString().slice(0, 10),
-          "trialUsage.count": 0 
+          "screenshotUsage.count": 0, "screenshotUsage.lastDate": new Date().toISOString().slice(0, 10)
         }
       },
       { new: true, upsert: true }
@@ -414,22 +406,29 @@ app.post("/api/auth/google", async (req, res) => {
   }
 });
 
+// === NEW: Session Rotation Endpoint ===
 app.post("/api/auth/session/rotate", async (req, res) => {
     try {
         const googleId = req.headers["x-google-id"];
         if(!googleId) return res.status(400).json({ error: "Missing ID" });
 
+        // Generate new session
         const newSessionId = crypto.randomUUID();
+        
+        // Update DB
         await User.findOneAndUpdate(
             { googleId },
             { currentSessionId: newSessionId }
         );
+
+        console.log(`[Session] Rotated session for ${googleId}`);
         res.json({ success: true, newSessionId });
     } catch(err) {
         console.error("Rotation error:", err);
         res.status(500).json({ error: "Rotation failed" });
     }
 });
+
 
 app.get("/api/user/status", async (req, res) => {
   try {
@@ -441,16 +440,15 @@ app.get("/api/user/status", async (req, res) => {
     const user = await User.findOne({ googleId });
     if (!user) return res.json({ active: false, tier: null });
 
+    // Session Mismatch Check
     if (user.currentSessionId && incomingSessionId && user.currentSessionId !== incomingSessionId) {
+        console.log(`[Security] Session Mismatch for ${user.email}. DB: ${user.currentSessionId} vs Incoming: ${incomingSessionId}`);
         return res.json({ sessionInvalid: true });
     }
 
-    // === VALIDITY CHECK ===
     if (user.subscription.status === "active" && user.subscription.validUntil && new Date() > user.subscription.validUntil) {
-      console.log(`[Status] Expired for ${user.email}. Disabling.`);
       user.subscription.status = "inactive";
       user.subscription.tier = "free";
-      user.subscription.validUntil = null; 
       await user.save();
     }
 
@@ -460,7 +458,6 @@ app.get("/api/user/status", async (req, res) => {
       validUntil: user.subscription.validUntil,
       freeUsage: user.freeUsage,
       screenshotUsage: user.screenshotUsage, 
-      trialUsage: user.trialUsage, 
       orders: user.orders ? user.orders.sort((a,b) => new Date(b.date) - new Date(a.date)) : []
     });
   } catch (err) {
@@ -468,52 +465,9 @@ app.get("/api/user/status", async (req, res) => {
   }
 });
 
-app.post("/api/user/start-trial", async (req, res) => {
-    try {
-        const googleId = req.headers["x-google-id"];
-        const { tier } = req.body; 
+// === CONTEXT API ENDPOINTS ===
 
-        if (!googleId) return res.status(401).json({ error: "Unauthorized" });
-        if (!['pro', 'pro_plus'].includes(tier)) return res.status(400).json({ error: "Invalid tier selection" });
-
-        const user = await User.findOne({ googleId });
-        if (!user) return res.status(404).json({ error: "User not found" });
-
-        if (user.subscription.status === 'active') {
-            return res.status(400).json({ error: "Subscription is already active" });
-        }
-
-        if (user.trialUsage.count >= MAX_TRIAL_SESSIONS) {
-            return res.status(403).json({ error: "Maximum trial sessions exceeded." });
-        }
-
-        const now = Date.now();
-        const durationMs = TRIAL_DURATION_MINUTES * 60 * 1000;
-        
-        user.subscription.status = "active";
-        user.subscription.tier = tier;
-        user.subscription.validUntil = new Date(now + durationMs);
-        
-        user.trialUsage.count += 1;
-        user.trialUsage.lastUsed = new Date();
-
-        await user.save();
-        console.log(`[Trial] Started for ${user.email}.`);
-
-        res.json({ 
-            success: true, 
-            status: user.subscription.status,
-            tier: user.subscription.tier,
-            validUntil: user.subscription.validUntil,
-            trialCount: user.trialUsage.count
-        });
-
-    } catch (err) {
-        console.error("Start Trial Error:", err);
-        res.status(500).json({ error: "Failed to start trial" });
-    }
-});
-
+// Get all contexts
 app.get("/api/user/context", async (req, res) => {
   try {
     const googleId = req.headers["x-google-id"];
@@ -528,6 +482,7 @@ app.get("/api/user/context", async (req, res) => {
   }
 });
 
+// Add or Update Context
 app.post("/api/user/context", async (req, res) => {
   try {
     const googleId = req.headers["x-google-id"];
@@ -539,6 +494,7 @@ app.post("/api/user/context", async (req, res) => {
     const user = await User.findOne({ googleId });
     if (!user) return res.status(404).json({ error: "User not found" });
 
+    // If setting this as active, deactivate others
     if (isActive) {
        user.contexts.forEach(c => c.isActive = false);
     }
@@ -546,11 +502,13 @@ app.post("/api/user/context", async (req, res) => {
     const existingIndex = user.contexts.findIndex(c => c.id === id);
 
     if (existingIndex > -1) {
+      // Update existing
       user.contexts[existingIndex].name = name;
       user.contexts[existingIndex].content = content;
       if (isActive !== undefined) user.contexts[existingIndex].isActive = isActive;
       user.contexts[existingIndex].updatedAt = new Date();
     } else {
+      // Create new
       if (user.contexts.length >= 10) {
         return res.status(400).json({ error: "Context limit reached (Max 10)" });
       }
@@ -571,16 +529,19 @@ app.post("/api/user/context", async (req, res) => {
   }
 });
 
+// Toggle Active State Only
 app.post("/api/user/context/toggle", async (req, res) => {
   try {
     const googleId = req.headers["x-google-id"];
-    const { id } = req.body; 
+    const { id } = req.body; // If ID is null, it means "No Context"
 
     const user = await User.findOne({ googleId });
     if (!user) return res.status(404).json({ error: "User not found" });
 
+    // Set all to false first
     user.contexts.forEach(c => c.isActive = false);
 
+    // If an ID is provided, set that one to true
     if (id) {
       const target = user.contexts.find(c => c.id === id);
       if (target) target.isActive = true;
@@ -593,6 +554,7 @@ app.post("/api/user/context/toggle", async (req, res) => {
   }
 });
 
+// Delete Context
 app.delete("/api/user/context/:id", async (req, res) => {
   try {
     const googleId = req.headers["x-google-id"];
@@ -640,7 +602,14 @@ app.post("/api/payment/create-order", async (req, res) => {
         tier === 'pro_plus') {
         
         isUpgrade = true;
-        let oldBasePrice = (user.subscription.cycle === 'monthly') ? PRICING.pro.monthly : (PRICING.pro.annual_per_month * 12);
+        
+        let oldBasePrice = 0.00;
+        if (user.subscription.cycle === 'monthly') {
+            oldBasePrice = PRICING.pro.monthly;
+        } else {
+            oldBasePrice = PRICING.pro.annual_per_month * 12;
+        }
+
         const oldDiscountAmount = (oldBasePrice * PRICING.pro.discount) / 100;
         oldPlanCredit = oldBasePrice - oldDiscountAmount;
         finalAmount = finalAmount - oldPlanCredit;
@@ -742,10 +711,14 @@ app.post("/api/payment/create-paypal-order", async (req, res) => {
 
     const discountAmount = (basePrice * priceInfo.discount) / 100;
     let finalAmountINR = basePrice - discountAmount;
+
     let isUpgrade = false;
     let oldPlanCredit = 0.00;
 
-    if (user.subscription.status === 'active' && user.subscription.tier === 'pro' && tier === 'pro_plus') {
+    if (user.subscription.status === 'active' && 
+        user.subscription.tier === 'pro' && 
+        tier === 'pro_plus') {
+        
         isUpgrade = true;
         let oldBasePrice = (user.subscription.cycle === 'monthly') ? PRICING.pro.monthly : (PRICING.pro.annual_per_month * 12);
         const oldDiscountAmount = (oldBasePrice * PRICING.pro.discount) / 100;
@@ -782,6 +755,7 @@ app.post("/api/payment/create-paypal-order", async (req, res) => {
 
     const orderData = await orderRes.json();
     if (!orderRes.ok || !orderData.id) {
+        console.error("❌ PayPal Order Failed:", JSON.stringify(orderData, null, 2));
         throw new Error("Failed to create PayPal Order");
     }
 
@@ -852,15 +826,11 @@ app.post("/api/payment/verify-paypal", async (req, res) => {
 
 app.post("/api/chat-stream", async (req, res) => {
   const googleId = req.headers["x-google-id"];
-  
-  // === CRITICAL FIX: REQUIRE LOGIN FOR CHAT ===
-  // If no Google ID is provided, deny the request. This prevents bypassing limits as a "guest".
-  if (!googleId) {
-      return res.status(401).json({ error: "Unauthorized: Login required" });
-  }
    
-  const check = await checkAndIncrementUsage(googleId);
-  if (!check.allowed) return res.status(403).json({ error: "Limit reached" });
+  if (googleId) {
+    const check = await checkAndIncrementUsage(googleId);
+    if (!check.allowed) return res.status(403).json({ error: "Limit reached" });
+  }
 
   const { conversationId, message } = req.body || {};
   if (!message || !message.role) return res.status(400).json({ error: "Invalid Body" });
@@ -869,23 +839,26 @@ app.post("/api/chat-stream", async (req, res) => {
       message.content = message.content.slice(-MAX_TEXT_CHAR_LIMIT);
   }
 
-  if (message.screenshot) {
+  if (message.screenshot && googleId) {
       const screenCheck = await checkScreenshotLimit(googleId);
       if (!screenCheck.allowed) {
           return res.status(403).json({ error: screenCheck.error });
       }
   }
 
+  // --- 1. FETCH ACTIVE CONTEXT ---
   let systemContextMessage = null;
-  const user = await User.findOne({ googleId }, { contexts: 1 });
-  if (user && user.contexts) {
-      const activeCtx = user.contexts.find(c => c.isActive);
-      if (activeCtx) {
-          systemContextMessage = {
-              role: "system",
-              content: `CRITICAL CONTEXT INSTRUCTION:\nThe user has provided the following specific context for this conversation.\n=== CONTEXT START ===\n${activeCtx.content}\n=== CONTEXT END ===\n\nIf the user's query is unrelated to this context, answer normally.`
-          };
-      }
+  if (googleId) {
+     const user = await User.findOne({ googleId }, { contexts: 1 });
+     if (user && user.contexts) {
+         const activeCtx = user.contexts.find(c => c.isActive);
+         if (activeCtx) {
+             systemContextMessage = {
+                 role: "system",
+                 content: `CRITICAL CONTEXT INSTRUCTION:\nThe user has provided the following specific context for this conversation (e.g., a resume, job description, or meeting notes).\nYou must adapt your answers to align with this context.\n\n=== CONTEXT START ===\n${activeCtx.content}\n=== CONTEXT END ===\n\nIf the user's query is unrelated to this context, answer normally but keep the context in mind if it becomes relevant.`
+             };
+         }
+     }
   }
 
   const convId = conversationId || `conv_${Date.now()}`;
@@ -929,14 +902,27 @@ app.post("/api/chat-stream", async (req, res) => {
         return { role: msg.role, content: msg.content };
     });
 
+    // --- 2. INJECT INTERVIEW PERSONA & CONTEXT ---
     const interviewSystemMsg = {
         role: "system",
-        content: `You are an expert technical candidate in a high-stakes job interview. Answer as if YOU are the candidate. Be concise, structured, and clear.`
+        content: `You are an expert technical candidate in a high-stakes job interview. 
+        Your goal is to provide the BEST POSSIBLE answer that ensures interview success.
+        
+        GUIDELINES:
+        1. **Mode**: Answer as if YOU are the candidate.
+        2. **Structure**: Summarize key points first. Be concise. The user needs to read this quickly and explain it verbally.
+        3. **Sequence**: For technical questions, explain steps in the exact order an interviewer expects (e.g., Naive -> Optimized).
+        4. **Clarity**: Make it easily understandable. Remove filler words.`
     };
     
+    // Unshift order: Last unshifted becomes first.
+    // We want: [Interview Persona, Context, ...User History]
+    
+    // Add Context First (so it is pushed down by Persona)
     if (systemContextMessage) {
         processedHistory.unshift(systemContextMessage);
     }
+    // Add Persona (so it stays at top)
     processedHistory.unshift(interviewSystemMsg);
 
     res.setHeader("x-conversation-id", convId);
@@ -1007,6 +993,31 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
     res.json({ text: data.text || "" });
   } catch (err) {
     res.status(500).json({ error: "Transcription failed" });
+  }
+});
+
+app.post("/api/transcribe-draft", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "Missing file" });
+    const mime = req.file.mimetype || "audio/webm";
+    const filename = req.file.originalname || "audio.webm";
+    const formData = new FormData();
+    formData.append("file", new Blob([req.file.buffer], { type: mime }), filename);
+    formData.append("model", "whisper-1"); 
+    formData.append("language", "en");
+
+    const openaiRes = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
+        body: formData
+    });
+    const data = await openaiRes.json();
+    if (!openaiRes.ok) throw new Error(data.error?.message || "OpenAI Error");
+    
+    res.json({ text: data.text || "" });
+  } catch (err) {
+    console.error("Draft Transcribe Error:", err);
+    res.status(500).json({ error: "Draft Transcription failed" });
   }
 });
 
