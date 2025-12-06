@@ -789,10 +789,14 @@ app.post("/api/transcribe", upload.single("file"), async (req, res) => {
   }
 });
 
-// --- NEW ROUTE: Draft Transcription (Missing in previous context) ---
+// --- NEW ROUTE: Draft Transcription ---
 app.post("/api/transcribe-draft", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "Missing file" });
+    
+    // Log receipt of draft
+    console.log(`[Draft] Received draft audio: ${req.file.size} bytes`);
+
     const mime = req.file.mimetype || "audio/webm";
     const filename = req.file.originalname || "audio.webm";
     const formData = new FormData();
@@ -808,7 +812,6 @@ app.post("/api/transcribe-draft", upload.single("file"), async (req, res) => {
     const data = await openaiRes.json();
     if (!openaiRes.ok) throw new Error(data.error?.message || "OpenAI Error");
     
-    // Log for server monitoring if needed, but client console will print it
     res.json({ text: data.text || "" });
   } catch (err) {
     console.error("Draft Transcribe Error:", err);
