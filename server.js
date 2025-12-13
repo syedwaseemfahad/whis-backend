@@ -36,7 +36,9 @@ const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
 const PAYPAL_CLIENT_ID = process.env.PAYPAL_CLIENT_ID;
 const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET;
 const PAYPAL_BASE_URL = process.env.PAYPAL_MODE === 'sandbox' ? "https://api-m.sandbox.paypal.com" : "https://api-m.paypal.com";
+// INR_TO_USD_RATE is no longer primary for conversion as base is USD, but kept for ref if needed
 const INR_TO_USD_RATE = 0.012; 
+const USD_TO_INR = parseFloat(process.env.USD_TO_INR || "90");
 
 // --- LIMITS & TRIAL CONFIGURATION ---
 const FREE_DAILY_LIMIT = parseInt(process.env.FREE_DAILY_LIMIT || "10", 10);
@@ -48,7 +50,7 @@ const MAX_TEXT_CHAR_LIMIT = parseInt(process.env.MAX_TEXT_CHAR_LIMIT || "4096", 
 const MAX_TRIAL_SESSIONS = parseInt(process.env.MAX_TRIAL_SESSIONS || "3", 10);
 const TRIAL_DURATION_MINUTES = 10; 
 
-// --- PRICING CONFIGURATION ---
+// --- PRICING CONFIGURATION (VALUES IN USD) ---
 const PRICING = {
   pro: {
     monthly: parseFloat(process.env.PRO_PER_MONTH), 
@@ -705,7 +707,7 @@ app.post("/api/payment/create-order", async (req, res) => {
     if (!user) return res.status(404).json({ error: "User not found" });
 
     let priceInfo;
-    let basePrice = 0.00;
+    let basePrice = 0.00; // This is now in USD
      
     if (tier === "pro") {
         priceInfo = PRICING.pro;
@@ -718,7 +720,7 @@ app.post("/api/payment/create-order", async (req, res) => {
     }
 
     const discountAmount = (basePrice * priceInfo.discount) / 100;
-    let finalAmount = basePrice - discountAmount;
+    let finalAmount = basePrice - discountAmount; // Still in USD
 
     let isUpgrade = false;
     let oldPlanCredit = 0.00;
@@ -742,21 +744,24 @@ app.post("/api/payment/create-order", async (req, res) => {
     }
 
     if (finalAmount < 0) finalAmount = 0;
-    finalAmount = Math.floor(finalAmount);
-    const amountInPaise = finalAmount * 100; 
+    
+    // --- CONVERSION TO INR FOR RAZORPAY ---
+    // finalAmount is in USD. We convert to INR using the new Env variable.
+    const amountInINR = Math.floor(finalAmount * USD_TO_INR);
+    const amountInPaise = amountInINR * 100; 
 
     const receiptId = `rcpt_${Date.now()}`;
     const options = { 
         amount: amountInPaise, 
         currency: "INR", 
         receipt: receiptId, 
-        notes: { userId: googleId, tier, cycle, isUpgrade: isUpgrade, oldCredit: oldPlanCredit, basePrice: basePrice } 
+        notes: { userId: googleId, tier, cycle, isUpgrade: isUpgrade, oldCredit: oldPlanCredit, basePriceUSD: basePrice } 
     };
 
     const order = await razorpay.orders.create(options);
     user.orders.push({ 
         orderId: order.id, 
-        amount: finalAmount, 
+        amount: amountInINR, // Storing in INR since payment is INR
         date: new Date(), 
         status: "created", 
         tier, 
@@ -824,7 +829,7 @@ app.post("/api/payment/create-paypal-order", async (req, res) => {
     if (!user) return res.status(404).json({ error: "User not found" });
 
     let priceInfo;
-    let basePrice = 0.00;
+    let basePrice = 0.00; // Base price is now USD
 
     if (tier === "pro") {
         priceInfo = PRICING.pro;
@@ -837,7 +842,8 @@ app.post("/api/payment/create-paypal-order", async (req, res) => {
     }
 
     const discountAmount = (basePrice * priceInfo.discount) / 100;
-    let finalAmountINR = basePrice - discountAmount;
+    // Calculation remains in USD throughout
+    let finalAmountUSD = basePrice - discountAmount; 
 
     let isUpgrade = false;
     let oldPlanCredit = 0.00;
@@ -850,14 +856,12 @@ app.post("/api/payment/create-paypal-order", async (req, res) => {
         let oldBasePrice = (user.subscription.cycle === 'monthly') ? PRICING.pro.monthly : (PRICING.pro.annual_per_month * 12);
         const oldDiscountAmount = (oldBasePrice * PRICING.pro.discount) / 100;
         oldPlanCredit = oldBasePrice - oldDiscountAmount;
-        finalAmountINR = finalAmountINR - oldPlanCredit;
+        finalAmountUSD = finalAmountUSD - oldPlanCredit;
     }
      
-    if (finalAmountINR < 0) finalAmountINR = 0;
-    finalAmountINR = Math.floor(finalAmountINR);
-
-    let finalAmountUSD = (finalAmountINR * INR_TO_USD_RATE).toFixed(2);
-    if(finalAmountUSD < 0.1) finalAmountUSD = "0.10"; 
+    if (finalAmountUSD < 0.1) finalAmountUSD = 0.10; // Minimum check
+    
+    const formattedAmountUSD = finalAmountUSD.toFixed(2);
 
     const accessToken = await getPayPalAccessToken();
     const orderRes = await fetch(`${PAYPAL_BASE_URL}/v2/checkout/orders`, {
@@ -869,7 +873,7 @@ app.post("/api/payment/create-paypal-order", async (req, res) => {
         body: JSON.stringify({
             intent: "CAPTURE",
             purchase_units: [{
-                amount: { currency_code: "USD", value: finalAmountUSD },
+                amount: { currency_code: "USD", value: formattedAmountUSD },
                 description: `${tier.toUpperCase()} Plan (${cycle})`
             }],
             application_context: {
@@ -888,7 +892,7 @@ app.post("/api/payment/create-paypal-order", async (req, res) => {
 
     user.orders.push({
         orderId: orderData.id,
-        amount: parseFloat(finalAmountUSD), 
+        amount: parseFloat(formattedAmountUSD), 
         currency: "USD",
         date: new Date(),
         status: "created",
@@ -896,7 +900,7 @@ app.post("/api/payment/create-paypal-order", async (req, res) => {
         cycle,
         receipt: `pp_${Date.now()}`,
         method: "paypal",
-        notes: { originalINR: finalAmountINR, isUpgrade }
+        notes: { isUpgrade }
     });
     await user.save();
 
