@@ -379,6 +379,7 @@ app.get("/ping", (req, res) => res.send("pong"));
 app.get("/api/config", (req, res) => {
     res.json({
         pricing: PRICING,
+        exchangeRate: USD_TO_INR, // <--- ADDED EXCHANGE RATE HERE
         googleClientId: GOOGLE_CLIENT_ID,
         websitePricingUrl: WEBSITE_PRICING_URL,
         limits: {
