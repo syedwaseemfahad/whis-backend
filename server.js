@@ -48,6 +48,8 @@ const MAX_TEXT_CHAR_LIMIT = parseInt(process.env.MAX_TEXT_CHAR_LIMIT || "4096", 
 
 // --- NEW: ON-DEMAND TRIAL CONFIGURATION ---
 const MAX_TRIAL_SESSIONS = parseInt(process.env.MAX_TRIAL_SESSIONS || "3", 10);
+const PRO_MONTHLY_SESSION_CREDITS = parseInt(process.env.PRO_MONTHLY_SESSION_CREDITS || "5", 10);
+const PROPLUS_MONTHLY_SESSION_CREDITS = parseInt(process.env.PROPLUS_MONTHLY_SESSION_CREDITS || "10", 10);
 const TRIAL_DURATION_MINUTES = 10; 
 
 // --- PRICING CONFIGURATION (VALUES IN USD) ---
@@ -145,6 +147,12 @@ const userSchema = new mongoose.Schema({
     count: { type: Number, default: 0 },
     lastDate: { type: String }
   },
+
+  // Monthly session credits (paid Pro/Pro Plus): each user-initiated interview session start consumes 1 credit
+  sessionUsage: {
+    count: { type: Number, default: 0 },
+    monthKey: { type: String, default: "" } // UTC month key, e.g. "2025-12"
+  },
   // --- CONTEXT FEATURE ---
   contexts: [
     {
@@ -167,6 +175,65 @@ const userSchema = new mongoose.Schema({
   lastLogin: Date
 });
 const User = mongoose.model("User", userSchema);
+
+// =========================
+// Monthly Session Credits (Paid Pro/Pro Plus)
+// =========================
+function getUtcMonthKey(d = new Date()) {
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  return `${y}-${m}`; // e.g., "2025-12"
+}
+
+function sessionCreditLimitForTier(tier) {
+  if (tier === "pro_plus") return PROPLUS_MONTHLY_SESSION_CREDITS;
+  if (tier === "pro") return PRO_MONTHLY_SESSION_CREDITS;
+  return 0;
+}
+
+async function getMonthlySessionCreditStatus(googleId, tier) {
+  const limit = sessionCreditLimitForTier(tier);
+  const monthKey = getUtcMonthKey(new Date());
+  const user = await User.findOne({ googleId });
+  if (!user) return null;
+
+  if (!user.sessionUsage || user.sessionUsage.monthKey !== monthKey) {
+    user.sessionUsage = { count: 0, monthKey };
+    await user.save();
+  }
+
+  const used = user.sessionUsage.count || 0;
+  const remaining = Math.max(0, limit - used);
+  return { used, remaining, limit, monthKey };
+}
+
+async function consumeMonthlySessionCredit(googleId, tier) {
+  const limit = sessionCreditLimitForTier(tier);
+  const monthKey = getUtcMonthKey(new Date());
+
+  // Reset month if needed (safe even if sessionUsage doesn't exist)
+  await User.updateOne(
+    { googleId, $or: [{ "sessionUsage.monthKey": { $ne: monthKey } }, { "sessionUsage.monthKey": { $exists: false } }] },
+    { $set: { "sessionUsage.monthKey": monthKey, "sessionUsage.count": 0 } }
+  );
+
+  // Atomically consume a credit (only if still under limit)
+  const updated = await User.findOneAndUpdate(
+    { googleId, "sessionUsage.monthKey": monthKey, "sessionUsage.count": { $lt: limit } },
+    { $inc: { "sessionUsage.count": 1 } },
+    { new: true }
+  );
+
+  if (!updated) {
+    const status = await getMonthlySessionCreditStatus(googleId, tier);
+    return { ok: false, ...status };
+  }
+
+  const used = updated.sessionUsage.count || 0;
+  const remaining = Math.max(0, limit - used);
+  return { ok: true, used, remaining, limit, monthKey };
+}
+
 
 const conversationSchema = new mongoose.Schema({
   conversationId: { type: String, required: true, unique: true, index: true },
@@ -548,6 +615,60 @@ app.post("/api/auth/session/rotate", async (req, res) => {
 });
 
 
+
+
+app.post("/api/user/session/start", async (req, res) => {
+  try {
+    const googleId = req.headers["x-google-id"];
+    const isAppRequest = req.headers["x-whis-auth"] === APP_AUTH_TOKEN;
+
+    if (!isAppRequest) return res.status(403).json({ error: "Forbidden" });
+    if (!googleId) return res.status(401).json({ error: "Not authenticated" });
+
+    const user = await User.findOne({ googleId });
+    if (!user) return res.status(401).json({ error: "Not authenticated" });
+
+    // Only PAID Pro / Pro Plus consume monthly session credits.
+    const isRealActive = user.subscription.status === "active";
+    const isTrial = !!user.subscription.isTrial;
+
+    if (!isRealActive || isTrial) {
+      return res.status(403).json({ error: "Session credits apply to paid plans only." });
+    }
+
+    const tier = user.subscription.tier;
+    if (!(tier === "pro" || tier === "pro_plus")) {
+      return res.status(403).json({ error: "Not eligible for session credits." });
+    }
+
+    const consumption = await consumeMonthlySessionCredit(googleId, tier);
+    if (!consumption.ok) {
+      return res.status(402).json({
+        error: "Monthly session credits exhausted.",
+        sessionCredits: {
+          used: consumption.used ?? 0,
+          remaining: consumption.remaining ?? 0,
+          limit: consumption.limit ?? sessionCreditLimitForTier(tier),
+          monthKey: consumption.monthKey ?? getUtcMonthKey(new Date())
+        }
+      });
+    }
+
+    return res.json({
+      ok: true,
+      sessionCredits: {
+        used: consumption.used,
+        remaining: consumption.remaining,
+        limit: consumption.limit,
+        monthKey: consumption.monthKey
+      }
+    });
+  } catch (err) {
+    console.error("Session start error:", err);
+    res.status(500).json({ error: "Failed to start session" });
+  }
+});
+
 app.get("/api/user/status", async (req, res) => {
   try {
     const googleId = req.headers["x-google-id"];
@@ -587,6 +708,12 @@ app.get("/api/user/status", async (req, res) => {
         reportedActive = isRealActive;
     }
 
+    // Monthly session credits (paid only)
+    let sessionCredits = null;
+    if (isRealActive && (user.subscription.tier === "pro" || user.subscription.tier === "pro_plus")) {
+        sessionCredits = await getMonthlySessionCreditStatus(googleId, user.subscription.tier);
+    }
+
     res.json({
       active: reportedActive,
       tier: user.subscription.tier,
@@ -596,7 +723,8 @@ app.get("/api/user/status", async (req, res) => {
       maxTrialSessions: MAX_TRIAL_SESSIONS,
       freeUsage: user.freeUsage,
       screenshotUsage: user.screenshotUsage, 
-      orders: user.orders ? user.orders.sort((a,b) => new Date(b.date) - new Date(a.date)) : []
+      
+      sessionCredits, orders: user.orders ? user.orders.sort((a,b) => new Date(b.date) - new Date(a.date)) : []
     });
   } catch (err) {
     res.status(500).json({ error: "Failed to check status" });
