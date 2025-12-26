@@ -51,8 +51,23 @@ const MAX_TRIAL_SESSIONS = parseInt(process.env.MAX_TRIAL_SESSIONS || "3", 10);
 const TRIAL_DURATION_MINUTES = 10; 
 
 // --- NEW: PAID MIC LIMIT (MONTHLY) ---
-const PAID_MIC_LIMIT_MINUTES = parseInt(process.env.PAID_MIC_LIMIT_MINUTES || "300", 10);
-const PAID_MIC_LIMIT_SECONDS = PAID_MIC_LIMIT_MINUTES * 60;
+// Source of truth should be backend env (NOT hardcoded in UI).
+// Prefer seconds (more precise). Falls back to minutes for backward compatibility.
+//
+// .env options (either one):
+//   PAID_MIC_LIMIT_SECONDS=18000   # 300 minutes
+//   PAID_MIC_LIMIT_MINUTES=300     # legacy
+const PAID_MIC_LIMIT_SECONDS = (() => {
+  const secRaw = process.env.PAID_MIC_LIMIT_SECONDS;
+  const sec = secRaw ? parseInt(secRaw, 10) : NaN;
+  if (Number.isFinite(sec) && sec > 0) return sec;
+
+  const mins = parseInt(process.env.PAID_MIC_LIMIT_MINUTES || "300", 10);
+  const safeMins = Number.isFinite(mins) && mins > 0 ? mins : 300;
+  return safeMins * 60;
+})();
+// Helpful for logs/debug (derived)
+const PAID_MIC_LIMIT_MINUTES = Math.ceil(PAID_MIC_LIMIT_SECONDS / 60);
 
 // --- PRICING CONFIGURATION (VALUES IN USD) ---
 const PRICING = {
