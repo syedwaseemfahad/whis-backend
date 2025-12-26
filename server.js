@@ -50,6 +50,10 @@ const MAX_TEXT_CHAR_LIMIT = parseInt(process.env.MAX_TEXT_CHAR_LIMIT || "4096", 
 const MAX_TRIAL_SESSIONS = parseInt(process.env.MAX_TRIAL_SESSIONS || "3", 10);
 const TRIAL_DURATION_MINUTES = 10; 
 
+// --- NEW: PAID MIC LIMIT (MONTHLY) ---
+const PAID_MIC_LIMIT_MINUTES = parseInt(process.env.PAID_MIC_LIMIT_MINUTES || "300", 10);
+const PAID_MIC_LIMIT_SECONDS = PAID_MIC_LIMIT_MINUTES * 60;
+
 // --- PRICING CONFIGURATION (VALUES IN USD) ---
 const PRICING = {
   pro: {
@@ -144,6 +148,11 @@ const userSchema = new mongoose.Schema({
   screenshotUsage: {
     count: { type: Number, default: 0 },
     lastDate: { type: String }
+  },
+  // NEW: Paid mic usage tracking (monthly)
+  micUsage: {
+    monthKey: { type: String }, // e.g., "2025-12"
+    secondsUsed: { type: Number, default: 0 }
   },
   // --- CONTEXT FEATURE ---
   contexts: [
@@ -304,6 +313,42 @@ async function checkAndIncrementUsage(googleId) {
       return { allowed: false, error: "Daily limit reached" };
   }
 }
+
+// === NEW: PAID MIC USAGE HELPERS (MONTHLY) ===
+function getMonthKey(d = new Date()) {
+  const year = d.getUTCFullYear();
+  const month = String(d.getUTCMonth() + 1).padStart(2, "0");
+  return `${year}-${month}`;
+}
+
+function isPaidMicEnforced(user) {
+  // Enforce only for real paid active subscriptions (NOT trial)
+  return (
+    user &&
+    user.subscription &&
+    user.subscription.status === "active" &&
+    (user.subscription.tier === "pro" || user.subscription.tier === "pro_plus") &&
+    !user.subscription.isTrial
+  );
+}
+
+async function normalizeMicUsageForMonth(user) {
+  const monthKey = getMonthKey(new Date());
+  if (!user.micUsage) user.micUsage = { monthKey, secondsUsed: 0 };
+
+  if (user.micUsage.monthKey !== monthKey) {
+    user.micUsage.monthKey = monthKey;
+    user.micUsage.secondsUsed = 0;
+    await user.save();
+  }
+  return user.micUsage;
+}
+
+function computeMicRemainingSeconds(user) {
+  const used = (user.micUsage && typeof user.micUsage.secondsUsed === "number") ? user.micUsage.secondsUsed : 0;
+  return Math.max(0, PAID_MIC_LIMIT_SECONDS - used);
+}
+
 
 // === CRITICAL: ATOMIC SCREENSHOT CHECKER ===
 async function checkScreenshotLimit(googleId) {
@@ -587,6 +632,16 @@ app.get("/api/user/status", async (req, res) => {
         reportedActive = isRealActive;
     }
 
+    // NEW: Paid mic monthly usage (enforced only for active paid, not trial)
+    const micUsageEnforced = isPaidMicEnforced(user);
+    if (micUsageEnforced) {
+      await normalizeMicUsageForMonth(user);
+    } else if (!user.micUsage) {
+      // Ensure field exists for older users (no-op save)
+      user.micUsage = { monthKey: getMonthKey(new Date()), secondsUsed: 0 };
+    }
+    const micRemainingSeconds = micUsageEnforced ? computeMicRemainingSeconds(user) : null;
+
     res.json({
       active: reportedActive,
       tier: user.subscription.tier,
@@ -596,12 +651,114 @@ app.get("/api/user/status", async (req, res) => {
       maxTrialSessions: MAX_TRIAL_SESSIONS,
       freeUsage: user.freeUsage,
       screenshotUsage: user.screenshotUsage, 
+      micUsageEnforced: micUsageEnforced,
+      micLimitSeconds: PAID_MIC_LIMIT_SECONDS,
+      micRemainingSeconds: micRemainingSeconds,
+      micUsage: user.micUsage,
       orders: user.orders ? user.orders.sort((a,b) => new Date(b.date) - new Date(a.date)) : []
     });
   } catch (err) {
     res.status(500).json({ error: "Failed to check status" });
   }
 });
+
+// === NEW: PAID MIC USAGE API (MONTHLY) ===
+app.get("/api/user/mic/status", async (req, res) => {
+  try {
+    const googleId = req.headers["x-google-id"];
+    const incomingSessionId = req.headers["x-session-id"];
+    const isAppRequest = req.headers["x-whis-auth"] === APP_AUTH_TOKEN;
+
+    if (!isAppRequest) return res.status(401).json({ error: "Unauthorized" });
+    if (!googleId) return res.status(401).json({ error: "Not authenticated" });
+
+    const user = await User.findOne({ googleId });
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    // Session Mismatch Check
+    if (user.currentSessionId && incomingSessionId && user.currentSessionId !== incomingSessionId) {
+      return res.json({ sessionInvalid: true });
+    }
+
+    const micUsageEnforced = isPaidMicEnforced(user);
+    if (micUsageEnforced) {
+      await normalizeMicUsageForMonth(user);
+    } else if (!user.micUsage) {
+      user.micUsage = { monthKey: getMonthKey(new Date()), secondsUsed: 0 };
+    }
+
+    const remaining = micUsageEnforced ? computeMicRemainingSeconds(user) : null;
+
+    res.json({
+      micUsageEnforced,
+      micLimitSeconds: PAID_MIC_LIMIT_SECONDS,
+      micRemainingSeconds: remaining,
+      micUsage: user.micUsage
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch mic status" });
+  }
+});
+
+app.post("/api/user/mic/consume", async (req, res) => {
+  try {
+    const googleId = req.headers["x-google-id"];
+    const incomingSessionId = req.headers["x-session-id"];
+    const isAppRequest = req.headers["x-whis-auth"] === APP_AUTH_TOKEN;
+
+    if (!isAppRequest) return res.status(401).json({ error: "Unauthorized" });
+    if (!googleId) return res.status(401).json({ error: "Not authenticated" });
+
+    const deltaSecondsRaw = req.body && typeof req.body.deltaSeconds === "number" ? req.body.deltaSeconds : 0;
+    const deltaSeconds = Math.max(0, Math.min(300, Math.floor(deltaSecondsRaw))); // clamp 0..300
+
+    const user = await User.findOne({ googleId });
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    // Session Mismatch Check
+    if (user.currentSessionId && incomingSessionId && user.currentSessionId !== incomingSessionId) {
+      return res.json({ sessionInvalid: true });
+    }
+
+    const micUsageEnforced = isPaidMicEnforced(user);
+
+    if (!micUsageEnforced) {
+      if (!user.micUsage) user.micUsage = { monthKey: getMonthKey(new Date()), secondsUsed: 0 };
+      return res.json({
+        micUsageEnforced: false,
+        micLimitSeconds: PAID_MIC_LIMIT_SECONDS,
+        micRemainingSeconds: null,
+        micUsage: user.micUsage
+      });
+    }
+
+    await normalizeMicUsageForMonth(user);
+
+    const usedBefore = user.micUsage.secondsUsed || 0;
+    const remainingBefore = Math.max(0, PAID_MIC_LIMIT_SECONDS - usedBefore);
+
+    const countedSeconds = Math.min(deltaSeconds, remainingBefore);
+
+    if (countedSeconds > 0) {
+      user.micUsage.secondsUsed = usedBefore + countedSeconds;
+      await user.save();
+    }
+
+    const remainingAfter = computeMicRemainingSeconds(user);
+
+    res.json({
+      micUsageEnforced: true,
+      micLimitSeconds: PAID_MIC_LIMIT_SECONDS,
+      micRemainingSeconds: remainingAfter,
+      micUsage: user.micUsage,
+      countedSeconds,
+      exhausted: remainingAfter <= 0
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to consume mic usage" });
+  }
+});
+
 
 // === CONTEXT API ENDPOINTS ===
 
