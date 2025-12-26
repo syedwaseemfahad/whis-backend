@@ -48,12 +48,7 @@ const MAX_TEXT_CHAR_LIMIT = parseInt(process.env.MAX_TEXT_CHAR_LIMIT || "4096", 
 
 // --- NEW: ON-DEMAND TRIAL CONFIGURATION ---
 const MAX_TRIAL_SESSIONS = parseInt(process.env.MAX_TRIAL_SESSIONS || "3", 10);
-const TRIAL_DURATION_MINUTES = 10;
-
-// --- NEW: PAID MONTHLY SESSION CREDITS ---
-const PRO_MONTHLY_SESSION_CREDITS = parseInt(process.env.PRO_MONTHLY_SESSION_CREDITS || "5", 10);
-const PROPLUS_MONTHLY_SESSION_CREDITS = parseInt(process.env.PROPLUS_MONTHLY_SESSION_CREDITS || "10", 10);
-
+const TRIAL_DURATION_MINUTES = 10; 
 
 // --- PRICING CONFIGURATION (VALUES IN USD) ---
 const PRICING = {
@@ -141,11 +136,6 @@ const userSchema = new mongoose.Schema({
   // NEW: Track specific trial sessions
   trialUsage: {
     count: { type: Number, default: 0 }
-  },
-  // NEW: Monthly paid session credits usage (counts sessions started)
-  sessionUsage: {
-    count: { type: Number, default: 0 },
-    monthKey: { type: String, default: "" }
   },
   freeUsage: {
     count: { type: Number, default: 0 },
@@ -558,27 +548,6 @@ app.post("/api/auth/session/rotate", async (req, res) => {
 });
 
 
-
-function getMonthKeyUTC(d = new Date()){
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  return `${y}-${m}`;
-}
-function getMonthlySessionLimitForTier(tier){
-  if(tier === "pro_plus") return PROPLUS_MONTHLY_SESSION_CREDITS;
-  if(tier === "pro") return PRO_MONTHLY_SESSION_CREDITS;
-  return 0;
-}
-async function ensureSessionUsageFresh(user){
-  const mk = getMonthKeyUTC(new Date());
-  if(!user.sessionUsage) user.sessionUsage = { count: 0, monthKey: mk };
-  if(user.sessionUsage.monthKey !== mk){
-    user.sessionUsage.count = 0;
-    user.sessionUsage.monthKey = mk;
-    await user.save();
-  }
-  return mk;
-}
 app.get("/api/user/status", async (req, res) => {
   try {
     const googleId = req.headers["x-google-id"];
@@ -626,11 +595,7 @@ app.get("/api/user/status", async (req, res) => {
       trialUsage: user.trialUsage || { count: 0 },
       maxTrialSessions: MAX_TRIAL_SESSIONS,
       freeUsage: user.freeUsage,
-      screenshotUsage: user.screenshotUsage,
-      sessionUsage: user.sessionUsage || { count: 0, monthKey: getMonthKeyUTC(new Date()) },
-      sessionCreditsLimit: getMonthlySessionLimitForTier(user.subscription.tier),
-      sessionCreditsRemaining: Math.max(0, getMonthlySessionLimitForTier(user.subscription.tier) - ((user.sessionUsage && user.sessionUsage.count) ? user.sessionUsage.count : 0)),
-      reenshotUsage, 
+      screenshotUsage: user.screenshotUsage, 
       orders: user.orders ? user.orders.sort((a,b) => new Date(b.date) - new Date(a.date)) : []
     });
   } catch (err) {
@@ -1206,51 +1171,3 @@ app.get('*', (req, res, next) => {
 app.listen(PORT, () => {
   console.log(`✅ Backend listening on http://localhost:${PORT}`);
 });
-// === Start a Paid 60-min Session (consumes 1 monthly credit immediately) ===
-app.post("/api/user/session/start", async (req, res) => {
-  try {
-    const googleId = req.headers["x-google-id"];
-    const isAppRequest = req.headers["x-whis-auth"] === APP_AUTH_TOKEN;
-    if(!isAppRequest) return res.status(403).json({ error: "forbidden" });
-    if(!googleId) return res.status(401).json({ error: "Not authenticated" });
-
-    const user = await User.findOne({ googleId });
-    if(!user) return res.status(404).json({ error: "user_not_found" });
-
-    const now = new Date();
-    // Only paid active subscriptions can start paid sessions
-    const isRealActive = user.subscription.status === "active" && !user.subscription.isTrial && user.subscription.validUntil && now < user.subscription.validUntil;
-    const tier = user.subscription.tier;
-
-    if(!isRealActive || (tier !== "pro" && tier !== "pro_plus")){
-      return res.status(403).json({ error: "not_paid" });
-    }
-
-    await ensureSessionUsageFresh(user);
-
-    const limit = getMonthlySessionLimitForTier(tier);
-    const used = (user.sessionUsage && typeof user.sessionUsage.count === "number") ? user.sessionUsage.count : 0;
-
-    if(used >= limit){
-      return res.status(403).json({ error: "no_session_credits" });
-    }
-
-    user.sessionUsage.count = used + 1;
-    user.sessionUsage.monthKey = getMonthKeyUTC(new Date());
-    await user.save();
-
-    const remaining = Math.max(0, limit - user.sessionUsage.count);
-
-    return res.json({
-      ok: true,
-      sessionCreditsLimit: limit,
-      sessionCreditsRemaining: remaining,
-      sessionUsage: user.sessionUsage
-    });
-  } catch (err) {
-    console.error("session/start error", err);
-    return res.status(500).json({ error: "server_error" });
-  }
-});
-
-
