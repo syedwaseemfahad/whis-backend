@@ -48,8 +48,6 @@ const MAX_TEXT_CHAR_LIMIT = parseInt(process.env.MAX_TEXT_CHAR_LIMIT || "4096", 
 
 // --- NEW: ON-DEMAND TRIAL CONFIGURATION ---
 const MAX_TRIAL_SESSIONS = parseInt(process.env.MAX_TRIAL_SESSIONS || "3", 10);
-const PRO_MONTHLY_SESSION_CREDITS = parseInt(process.env.PRO_MONTHLY_SESSION_CREDITS || "5", 10);
-const PROPLUS_MONTHLY_SESSION_CREDITS = parseInt(process.env.PROPLUS_MONTHLY_SESSION_CREDITS || "10", 10);
 const TRIAL_DURATION_MINUTES = 10; 
 
 // --- PRICING CONFIGURATION (VALUES IN USD) ---
@@ -146,11 +144,6 @@ const userSchema = new mongoose.Schema({
   screenshotUsage: {
     count: { type: Number, default: 0 },
     lastDate: { type: String }
-  },
-  // Monthly interview session credits (each mic start counts as 1 credit)
-  sessionUsage: {
-    count: { type: Number, default: 0 },
-    monthKey: { type: String, default: "" } // YYYY-MM (UTC)
   },
   // --- CONTEXT FEATURE ---
   contexts: [
@@ -378,88 +371,6 @@ async function getPayPalAccessToken() {
     const data = await response.json();
     return data.access_token;
 }
-// === MONTHLY INTERVIEW SESSION CREDIT CHECKER ===
-// Each time the user STARTS a voice interview session (mic on by user), it consumes 1 credit.
-// Credits reset every calendar month (UTC).
-function getMonthKeyUTC(date = new Date()) {
-  const y = date.getUTCFullYear();
-  const m = String(date.getUTCMonth() + 1).padStart(2, "0");
-  return `${y}-${m}`;
-}
-
-function getNextMonthResetUTC(date = new Date()) {
-  const y = date.getUTCFullYear();
-  const m = date.getUTCMonth();
-  // first day of next month 00:00:00 UTC
-  return new Date(Date.UTC(y, m + 1, 1, 0, 0, 0));
-}
-
-function getSessionCreditLimitForTier(tier) {
-  if (tier === "pro_plus") return PROPLUS_MONTHLY_SESSION_CREDITS;
-  if (tier === "pro") return PRO_MONTHLY_SESSION_CREDITS;
-  return 0;
-}
-
-async function getMonthlySessionCreditStatus(googleId, tier) {
-  const limit = getSessionCreditLimitForTier(tier);
-  if (!limit) return { limit: 0, used: 0, remaining: 0, resetAt: getNextMonthResetUTC().toISOString(), monthKey: getMonthKeyUTC() };
-
-  const monthKey = getMonthKeyUTC();
-
-  // Reset counter if month changed
-  await User.updateOne(
-    { googleId, $or: [{ "sessionUsage.monthKey": { $ne: monthKey } }, { "sessionUsage.monthKey": { $exists: false } }] },
-    { $set: { "sessionUsage.count": 0, "sessionUsage.monthKey": monthKey } }
-  );
-
-  const user = await User.findOne({ googleId }, { sessionUsage: 1 });
-  const used = user?.sessionUsage?.count || 0;
-  return {
-    limit,
-    used,
-    remaining: Math.max(0, limit - used),
-    resetAt: getNextMonthResetUTC().toISOString(),
-    monthKey
-  };
-}
-
-async function consumeMonthlySessionCredit(googleId, tier) {
-  const limit = getSessionCreditLimitForTier(tier);
-  const monthKey = getMonthKeyUTC();
-
-  if (!limit) {
-    return { allowed: true, limit: 0, used: 0, remaining: 0, resetAt: getNextMonthResetUTC().toISOString(), monthKey };
-  }
-
-  // Reset counter if month changed (non-atomic but safe; consumption is atomic below)
-  await User.updateOne(
-    { googleId, $or: [{ "sessionUsage.monthKey": { $ne: monthKey } }, { "sessionUsage.monthKey": { $exists: false } }] },
-    { $set: { "sessionUsage.count": 0, "sessionUsage.monthKey": monthKey } }
-  );
-
-  // Atomically consume 1 credit if under limit
-  const updatedUser = await User.findOneAndUpdate(
-    { googleId, "sessionUsage.monthKey": monthKey, "sessionUsage.count": { $lt: limit } },
-    { $inc: { "sessionUsage.count": 1 } },
-    { new: true }
-  );
-
-  if (!updatedUser) {
-    const status = await getMonthlySessionCreditStatus(googleId, tier);
-    return { allowed: false, ...status, error: "Monthly interview session limit reached" };
-  }
-
-  const used = updatedUser.sessionUsage?.count || 0;
-  return {
-    allowed: true,
-    limit,
-    used,
-    remaining: Math.max(0, limit - used),
-    resetAt: getNextMonthResetUTC().toISOString(),
-    monthKey
-  };
-}
-
 
 // ================= ROUTES =================
 
@@ -637,80 +548,6 @@ app.post("/api/auth/session/rotate", async (req, res) => {
 });
 
 
-
-
-// === INTERVIEW SESSION START (CONSUMES MONTHLY CREDIT FOR PAID PLANS) ===
-// Called by the desktop app when the user intentionally starts a voice interview session (mic ON).
-app.post("/api/user/session/start", async (req, res) => {
-  try {
-    // Only the desktop app should call this (prevents direct website abuse)
-    const isAppRequest = req.headers["x-whis-auth"] === APP_AUTH_TOKEN;
-    if (!isAppRequest) return res.status(403).json({ error: "Forbidden" });
-
-    const googleId = req.headers["x-google-id"] || req.body?.googleId;
-    if (!googleId) return res.status(401).json({ error: "Not authenticated" });
-
-    const user = await User.findOne({ googleId });
-    if (!user) return res.status(404).json({ error: "User not found" });
-
-    const now = new Date();
-
-    // Auto-downgrade if expired
-    if (user.subscription.status === "active" && user.subscription.validUntil && now > user.subscription.validUntil) {
-      user.subscription.status = "inactive";
-      user.subscription.tier = "free";
-      user.subscription.isTrial = false;
-      await user.save();
-    }
-
-    const isPaidActive = user.subscription.status === "active";
-    const isTrialValid = user.subscription.isTrial && user.subscription.validUntil && now < user.subscription.validUntil;
-
-    if (!isPaidActive && !isTrialValid) {
-      return res.status(403).json({ error: "No active subscription" });
-    }
-
-    // Trials keep existing logic (time-based), so do NOT consume monthly credits for trials.
-    if (isTrialValid && !isPaidActive) {
-      return res.json({ success: true, trial: true });
-    }
-
-    const tier = user.subscription.tier;
-
-    // Only paid Pro / Pro Plus have monthly interview session credits
-    if (tier !== "pro" && tier !== "pro_plus") {
-      return res.json({ success: true, credits: null });
-    }
-
-    const consumption = await consumeMonthlySessionCredit(googleId, tier);
-    if (!consumption.allowed) {
-      return res.status(403).json({
-        error: consumption.error,
-        limit: consumption.limit,
-        used: consumption.used,
-        remaining: consumption.remaining,
-        resetAt: consumption.resetAt,
-        monthKey: consumption.monthKey
-      });
-    }
-
-    return res.json({
-      success: true,
-      credits: {
-        limit: consumption.limit,
-        used: consumption.used,
-        remaining: consumption.remaining,
-        resetAt: consumption.resetAt,
-        monthKey: consumption.monthKey
-      }
-    });
-  } catch (err) {
-    console.error("Session start error:", err);
-    res.status(500).json({ error: "Failed to start session" });
-  }
-});
-
-
 app.get("/api/user/status", async (req, res) => {
   try {
     const googleId = req.headers["x-google-id"];
@@ -750,13 +587,6 @@ app.get("/api/user/status", async (req, res) => {
         reportedActive = isRealActive;
     }
 
-
-    // Monthly interview session credits (paid only). Trials keep time-based access.
-    let sessionCredits = null;
-    if (isRealActive && (user.subscription.tier === "pro" || user.subscription.tier === "pro_plus")) {
-        sessionCredits = await getMonthlySessionCreditStatus(googleId, user.subscription.tier);
-    }
-
     res.json({
       active: reportedActive,
       tier: user.subscription.tier,
@@ -765,8 +595,7 @@ app.get("/api/user/status", async (req, res) => {
       trialUsage: user.trialUsage || { count: 0 },
       maxTrialSessions: MAX_TRIAL_SESSIONS,
       freeUsage: user.freeUsage,
-      screenshotUsage: user.screenshotUsage,
-      sessionCredits, 
+      screenshotUsage: user.screenshotUsage, 
       orders: user.orders ? user.orders.sort((a,b) => new Date(b.date) - new Date(a.date)) : []
     });
   } catch (err) {
@@ -979,8 +808,6 @@ app.post("/api/payment/verify", async (req, res) => {
       user.subscription.tier = order?.tier || "pro";
       user.subscription.cycle = order?.cycle || "monthly";
       user.subscription.isTrial = false; // Reset trial flag if paying
-      // Reset monthly interview session credits on payment activation
-      user.sessionUsage = { count: 0, monthKey: getMonthKeyUTC() };
       
       const days = order?.cycle === "annual" ? 365 : 30;
       user.subscription.validUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
@@ -1114,8 +941,6 @@ app.post("/api/payment/verify-paypal", async (req, res) => {
           user.subscription.tier = dbOrder.tier;
           user.subscription.cycle = dbOrder.cycle;
           user.subscription.isTrial = false; // Reset trial
-          // Reset monthly interview session credits on payment activation
-          user.sessionUsage = { count: 0, monthKey: getMonthKeyUTC() };
           
           const days = dbOrder.cycle === "annual" ? 365 : 30;
           user.subscription.validUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
