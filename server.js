@@ -192,6 +192,18 @@ const conversationSchema = new mongoose.Schema({
 conversationSchema.index({ updatedAt: 1 }, { expireAfterSeconds: 86400 }); 
 const Conversation = mongoose.model("Conversation", conversationSchema);
 
+// --- NEW FEATURE: FREE REQUEST SCHEMA ---
+const freeRequestSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  email: { type: String, required: true },
+  whatsapp: { type: String, required: true },
+  yoe: { type: Number, required: true },
+  targetRole: { type: String },
+  ip: String,
+  timestamp: { type: Date, default: Date.now }
+});
+const FreeRequest = mongoose.model("free_request", freeRequestSchema);
+
 
 // --------- 3. SMART TRAFFIC TRACKING MIDDLEWARE ---------
 app.use((req, res, next) => {
@@ -1315,6 +1327,40 @@ app.post("/api/transcribe-draft", upload.single("file"), async (req, res) => {
   } catch (err) {
     console.error("Draft Transcribe Error:", err);
     res.status(500).json({ error: "Draft Transcription failed" });
+  }
+});
+
+// --- NEW FEATURE: FREE REQUEST ENDPOINT ---
+app.post("/api/request-access", async (req, res) => {
+  try {
+    const { name, email, whatsapp, yoe, targetRole } = req.body;
+    
+    // Validation
+    if (!name || !email || !whatsapp || !yoe) {
+      return res.status(400).json({ error: "All mandatory fields must be filled." });
+    }
+
+    const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
+
+    const newRequest = new FreeRequest({
+      name,
+      email,
+      whatsapp,
+      yoe,
+      targetRole,
+      ip
+    });
+
+    await newRequest.save();
+    
+    // Simulate a slight delay for "Processing" effect
+    setTimeout(() => {
+        res.json({ success: true, message: "Application Submitted Successfully" });
+    }, 1000);
+
+  } catch (err) {
+    console.error("Free Request Error:", err);
+    res.status(500).json({ error: "Submission failed. Try again." });
   }
 });
 
