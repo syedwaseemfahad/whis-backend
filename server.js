@@ -50,9 +50,6 @@ const MAX_TEXT_CHAR_LIMIT = parseInt(process.env.MAX_TEXT_CHAR_LIMIT || "4096", 
 const MAX_TRIAL_SESSIONS = parseInt(process.env.MAX_TRIAL_SESSIONS || "3", 10);
 const TRIAL_DURATION_MINUTES = 10; 
 
-// --- NEW: ELITE OFFER DURATION ---
-const FREE_ELITE_DURATION_DAYS = parseInt(process.env.FREE_ELITE_DURATION_DAYS || "30", 10);
-
 // --- NEW: PAID MIC LIMIT (MONTHLY) ---
 const PAID_MIC_LIMIT_MINUTES = parseInt(process.env.PAID_MIC_LIMIT_MINUTES || "300", 10);
 const PAID_MIC_LIMIT_SECONDS = PAID_MIC_LIMIT_MINUTES * 60;
@@ -131,8 +128,6 @@ const userSchema = new mongoose.Schema({
   name: String,
   avatarUrl: String,
   phone: String,
-  // NEW: Track if they already claimed the Elite offer
-  hasUsedFreeElite: { type: Boolean, default: false },
   // Session Control
   currentSessionId: { type: String, default: "" },
   subscription: {
@@ -494,7 +489,7 @@ app.post("/api/auth/google", async (req, res) => {
     const newSessionId = crypto.randomUUID();
 
     // New users start as Free Tier (Inactive)
-    let user = await User.findOneAndUpdate(
+    const user = await User.findOneAndUpdate(
       { googleId },
       {
         email, name, avatarUrl, lastLogin: new Date(),
@@ -503,7 +498,6 @@ app.post("/api/auth/google", async (req, res) => {
           "subscription.status": "inactive", 
           "subscription.tier": "free",
           "trialUsage.count": 0,
-          "hasUsedFreeElite": false,
           
           "freeUsage.count": 0, "freeUsage.lastDate": new Date().toISOString().slice(0, 10),
           "screenshotUsage.count": 0, "screenshotUsage.lastDate": new Date().toISOString().slice(0, 10)
@@ -512,30 +506,6 @@ app.post("/api/auth/google", async (req, res) => {
       { new: true, upsert: true }
     );
     
-    // --- CHECK FOR PENDING ELITE REQUEST ON LOGIN ---
-    if (!user.hasUsedFreeElite) {
-        // Check if they filled the form BEFORE signing up
-        const pendingRequest = await FreeRequest.findOne({ email: email });
-        
-        if (pendingRequest) {
-            console.log(`[Auth] Found pending Elite request for ${email}. Upgrading now.`);
-            
-            user.subscription.status = "active";
-            user.subscription.tier = "pro_plus"; // Elite Tier
-            user.subscription.cycle = "monthly";
-            user.subscription.isTrial = false;
-            
-            // Mark as used
-            user.hasUsedFreeElite = true;
-
-            // Set Validity (using the Config variable)
-            user.subscription.validUntil = new Date(Date.now() + FREE_ELITE_DURATION_DAYS * 24 * 60 * 60 * 1000);
-            
-            await user.save();
-        }
-    }
-    // ------------------------------------------------
-
     res.json({ success: true, user, tokens: { id_token: idToken, access_token: accessToken } });
   } catch (err) {
     console.error("Auth Error:", err);
@@ -689,7 +659,6 @@ app.get("/api/user/status", async (req, res) => {
       tier: user.subscription.tier,
       validUntil: user.subscription.validUntil,
       isTrial: !!user.subscription.isTrial, // Return trial status
-      hasUsedFreeElite: !!user.hasUsedFreeElite, // Send Flag to Frontend
       trialUsage: user.trialUsage || { count: 0 },
       maxTrialSessions: MAX_TRIAL_SESSIONS,
       freeUsage: user.freeUsage,
@@ -1383,40 +1352,10 @@ app.post("/api/request-access", async (req, res) => {
     });
 
     await newRequest.save();
-
-    // --- INSTANT UPGRADE LOGIC ---
-    let upgraded = false;
-    let message = "Application Submitted Successfully";
-
-    const user = await User.findOne({ email: email });
-    if (user) {
-        if (user.hasUsedFreeElite) {
-             return res.json({ 
-                 success: true, 
-                 upgraded: false, 
-                 message: "You have already used your 1-Month Free Elite Pass. You cannot claim it again." 
-             });
-        }
-        
-        console.log(`[Auto-Upgrade] upgrading user ${email} to Elite`);
-        user.subscription.status = "active";
-        user.subscription.tier = "pro_plus";
-        user.subscription.cycle = "monthly";
-        user.subscription.isTrial = false;
-        
-        // MARK AS USED
-        user.hasUsedFreeElite = true; 
-        
-        // SET DURATION (Configurable)
-        user.subscription.validUntil = new Date(Date.now() + FREE_ELITE_DURATION_DAYS * 24 * 60 * 60 * 1000);
-        
-        await user.save();
-        upgraded = true;
-    }
-    // -----------------------------
     
+    // Simulate a slight delay for "Processing" effect
     setTimeout(() => {
-        res.json({ success: true, message: message, upgraded: upgraded });
+        res.json({ success: true, message: "Application Submitted Successfully" });
     }, 1000);
 
   } catch (err) {
