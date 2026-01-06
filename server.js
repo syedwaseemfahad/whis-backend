@@ -200,7 +200,6 @@ const freeRequestSchema = new mongoose.Schema({
   yoe: { type: Number, required: true },
   targetRole: { type: String },
   ip: String,
-  googleId: String, // Linked to the user who requested
   timestamp: { type: Date, default: Date.now }
 });
 const FreeRequest = mongoose.model("free_request", freeRequestSchema);
@@ -1331,63 +1330,32 @@ app.post("/api/transcribe-draft", upload.single("file"), async (req, res) => {
   }
 });
 
-// --- NEW FEATURE: FREE REQUEST ENDPOINT (UPDATED FOR AUTO-GRANT) ---
+// --- NEW FEATURE: FREE REQUEST ENDPOINT ---
 app.post("/api/request-access", async (req, res) => {
   try {
     const { name, email, whatsapp, yoe, targetRole } = req.body;
-    const googleId = req.headers["x-google-id"];
-
-    // 1. Mandatory Validation
+    
+    // Validation
     if (!name || !email || !whatsapp || !yoe) {
       return res.status(400).json({ error: "All mandatory fields must be filled." });
     }
 
-    if (!googleId) {
-        return res.status(401).json({ error: "Authentication required to claim access." });
-    }
-
     const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
 
-    // 2. Save Request for Record Keeping
     const newRequest = new FreeRequest({
       name,
       email,
       whatsapp,
       yoe,
       targetRole,
-      ip,
-      googleId
+      ip
     });
 
     await newRequest.save();
     
-    // 3. AUTO-GRANT: Upgrade the user to 'pro_plus' for 30 days
-    const expiryDate = new Date();
-    expiryDate.setDate(expiryDate.getDate() + 30); // Add 30 days
-
-    const updatedUser = await User.findOneAndUpdate(
-        { googleId },
-        { 
-            $set: {
-                "subscription.status": "active",
-                "subscription.tier": "pro_plus", // Grant Elite status
-                "subscription.cycle": "monthly",
-                "subscription.validUntil": expiryDate,
-                "subscription.isTrial": false
-            }
-        },
-        { new: true }
-    );
-
-    if (!updatedUser) {
-        return res.status(404).json({ error: "User not found for upgrade." });
-    }
-
-    console.log(`[Auto-Grant] User ${email} upgraded to Elite via form.`);
-
     // Simulate a slight delay for "Processing" effect
     setTimeout(() => {
-        res.json({ success: true, message: "Elite Access Granted Successfully" });
+        res.json({ success: true, message: "Application Submitted Successfully" });
     }, 1000);
 
   } catch (err) {
