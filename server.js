@@ -50,6 +50,9 @@ const MAX_TEXT_CHAR_LIMIT = parseInt(process.env.MAX_TEXT_CHAR_LIMIT || "4096", 
 const MAX_TRIAL_SESSIONS = parseInt(process.env.MAX_TRIAL_SESSIONS || "3", 10);
 const TRIAL_DURATION_MINUTES = 10; 
 
+// --- NEW CONFIG: ELITE OFFER DURATION ---
+const FREE_ELITE_DURATION_DAYS = parseInt(process.env.FREE_ELITE_DURATION_DAYS || "30", 10);
+
 // --- NEW: PAID MIC LIMIT (MONTHLY) ---
 const PAID_MIC_LIMIT_MINUTES = parseInt(process.env.PAID_MIC_LIMIT_MINUTES || "300", 10);
 const PAID_MIC_LIMIT_SECONDS = PAID_MIC_LIMIT_MINUTES * 60;
@@ -70,7 +73,7 @@ const PRICING = {
 
 // --- INITIAL CHECKS ---
 console.log("--- 🚀 STARTING SERVER ---");
-console.log(`--- 📊 LIMITS: FreeChat=${FREE_DAILY_LIMIT}, MaxTrialSessions=${MAX_TRIAL_SESSIONS} ---`);
+console.log(`--- 📊 LIMITS: FreeChat=${FREE_DAILY_LIMIT}, ElitePromo=${FREE_ELITE_DURATION_DAYS} Days ---`);
 
 if (!OPENAI_API_KEY) console.error("⚠️  MISSING: OPENAI_API_KEY");
 if (!RAZORPAY_KEY_ID) console.error("⚠️  MISSING: RAZORPAY_KEY_ID");
@@ -130,6 +133,10 @@ const userSchema = new mongoose.Schema({
   phone: String,
   // Session Control
   currentSessionId: { type: String, default: "" },
+  
+  // NEW FLAG: Track if they already claimed the Elite offer
+  hasUsedFreeElite: { type: Boolean, default: false },
+
   subscription: {
     status: { type: String, enum: ["active", "inactive", "past_due"], default: "inactive" },
     tier: { type: String, enum: ["free", "pro", "pro_plus"], default: "free" },
@@ -308,8 +315,6 @@ async function checkAndIncrementUsage(googleId) {
   }
 
   // 4. Free Tier - ATOMIC INCREMENT
-  // This is the CRITICAL FIX. The query strictly requires count < LIMIT.
-  // It increments and returns the new document ONLY if condition met.
   const result = await User.findOneAndUpdate(
       { 
           googleId: googleId, 
@@ -436,7 +441,7 @@ app.get("/ping", (req, res) => res.send("pong"));
 app.get("/api/config", (req, res) => {
     res.json({
         pricing: PRICING,
-        exchangeRate: USD_TO_INR, // <--- ADDED EXCHANGE RATE HERE FOR FRONTEND
+        exchangeRate: USD_TO_INR, 
         googleClientId: GOOGLE_CLIENT_ID,
         websitePricingUrl: WEBSITE_PRICING_URL,
         limits: {
@@ -498,6 +503,7 @@ app.post("/api/auth/google", async (req, res) => {
           "subscription.status": "inactive", 
           "subscription.tier": "free",
           "trialUsage.count": 0,
+          "hasUsedFreeElite": false,
           
           "freeUsage.count": 0, "freeUsage.lastDate": new Date().toISOString().slice(0, 10),
           "screenshotUsage.count": 0, "screenshotUsage.lastDate": new Date().toISOString().slice(0, 10)
@@ -635,8 +641,6 @@ app.get("/api/user/status", async (req, res) => {
     const isRealActive = user.subscription.status === "active";
     const isTrialValid = user.subscription.isTrial && user.subscription.validUntil && now < user.subscription.validUntil;
 
-    // Website view: Only report active if it's a REAL paid subscription
-    // App View: Report active if Paid OR Trial
     let reportedActive = false;
     if (isAppRequest) {
         reportedActive = isRealActive || isTrialValid;
@@ -644,12 +648,10 @@ app.get("/api/user/status", async (req, res) => {
         reportedActive = isRealActive;
     }
 
-    // NEW: Paid mic monthly usage (enforced only for active paid, not trial)
     const micUsageEnforced = isPaidMicEnforced(user);
     if (micUsageEnforced) {
       await normalizeMicUsageForMonth(user);
     } else if (!user.micUsage) {
-      // Ensure field exists for older users (no-op save)
       user.micUsage = { monthKey: getMonthKey(new Date()), secondsUsed: 0 };
     }
     const micRemainingSeconds = micUsageEnforced ? computeMicRemainingSeconds(user) : null;
@@ -658,7 +660,7 @@ app.get("/api/user/status", async (req, res) => {
       active: reportedActive,
       tier: user.subscription.tier,
       validUntil: user.subscription.validUntil,
-      isTrial: !!user.subscription.isTrial, // Return trial status
+      isTrial: !!user.subscription.isTrial, 
       trialUsage: user.trialUsage || { count: 0 },
       maxTrialSessions: MAX_TRIAL_SESSIONS,
       freeUsage: user.freeUsage,
@@ -667,6 +669,7 @@ app.get("/api/user/status", async (req, res) => {
       micLimitSeconds: PAID_MIC_LIMIT_SECONDS,
       micRemainingSeconds: micRemainingSeconds,
       micUsage: user.micUsage,
+      hasUsedFreeElite: !!user.hasUsedFreeElite, // Send Flag
       orders: user.orders ? user.orders.sort((a,b) => new Date(b.date) - new Date(a.date)) : []
     });
   } catch (err) {
@@ -1352,30 +1355,44 @@ app.post("/api/request-access", async (req, res) => {
     });
 
     await newRequest.save();
-
-    // --- NEW: AUTOMATIC UPGRADE LOGIC ---
+    
+    // --- AUTOMATIC UPGRADE LOGIC ---
     let upgraded = false;
-    // Find user by email (case-insensitive usually preferred, but strict here for safety)
+    let message = "Application Submitted Successfully";
+
     const user = await User.findOne({ email: email });
     
     if (user) {
+        // CHECK: Has this user already used the offer?
+        if (user.hasUsedFreeElite) {
+            console.log(`[Auto-Upgrade] Denied for ${email}: Already used.`);
+            return res.json({ 
+                success: true, 
+                upgraded: false, 
+                message: "You have already used your Free Elite Pass. This is a one-time offer." 
+            });
+        }
+
         console.log(`[Auto-Upgrade] upgrading user ${email} to Elite`);
         user.subscription.status = "active";
-        user.subscription.tier = "pro_plus"; // Elite Tier
+        user.subscription.tier = "pro_plus"; 
         user.subscription.cycle = "monthly";
-        user.subscription.isTrial = false; // Full access, not a trial flag
+        user.subscription.isTrial = false;
         
-        // Grant 30 Days
-        user.subscription.validUntil = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+        // MARK AS USED
+        user.hasUsedFreeElite = true; 
+
+        // GRANT DURATION FROM ENV (Default 30 days)
+        user.subscription.validUntil = new Date(Date.now() + FREE_ELITE_DURATION_DAYS * 24 * 60 * 60 * 1000);
         
         await user.save();
         upgraded = true;
     }
     // ------------------------------------
-    
+
     // Simulate a slight delay for "Processing" effect
     setTimeout(() => {
-        res.json({ success: true, message: "Application Submitted Successfully", upgraded: upgraded });
+        res.json({ success: true, message: message, upgraded: upgraded });
     }, 1000);
 
   } catch (err) {
