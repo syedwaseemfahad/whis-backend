@@ -1352,10 +1352,30 @@ app.post("/api/request-access", async (req, res) => {
     });
 
     await newRequest.save();
+
+    // --- NEW: AUTOMATIC UPGRADE LOGIC ---
+    let upgraded = false;
+    // Find user by email (case-insensitive usually preferred, but strict here for safety)
+    const user = await User.findOne({ email: email });
+    
+    if (user) {
+        console.log(`[Auto-Upgrade] upgrading user ${email} to Elite`);
+        user.subscription.status = "active";
+        user.subscription.tier = "pro_plus"; // Elite Tier
+        user.subscription.cycle = "monthly";
+        user.subscription.isTrial = false; // Full access, not a trial flag
+        
+        // Grant 30 Days
+        user.subscription.validUntil = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+        
+        await user.save();
+        upgraded = true;
+    }
+    // ------------------------------------
     
     // Simulate a slight delay for "Processing" effect
     setTimeout(() => {
-        res.json({ success: true, message: "Application Submitted Successfully" });
+        res.json({ success: true, message: "Application Submitted Successfully", upgraded: upgraded });
     }, 1000);
 
   } catch (err) {
