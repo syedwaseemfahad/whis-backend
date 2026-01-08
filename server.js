@@ -50,6 +50,9 @@ const MAX_TEXT_CHAR_LIMIT = parseInt(process.env.MAX_TEXT_CHAR_LIMIT || "4096", 
 const MAX_TRIAL_SESSIONS = parseInt(process.env.MAX_TRIAL_SESSIONS || "3", 10);
 const TRIAL_DURATION_MINUTES = 10; 
 
+// --- NEW: FREE ACCESS CAMPAIGN (DAYS) ---
+const FREE_ACCESS_DAYS = parseInt(process.env.FREE_ACCESS_DAYS || "30", 10);
+
 // --- NEW: PAID MIC LIMIT (MONTHLY) ---
 const PAID_MIC_LIMIT_MINUTES = parseInt(process.env.PAID_MIC_LIMIT_MINUTES || "300", 10);
 const PAID_MIC_LIMIT_SECONDS = PAID_MIC_LIMIT_MINUTES * 60;
@@ -70,7 +73,7 @@ const PRICING = {
 
 // --- INITIAL CHECKS ---
 console.log("--- 🚀 STARTING SERVER ---");
-console.log(`--- 📊 LIMITS: FreeChat=${FREE_DAILY_LIMIT}, MaxTrialSessions=${MAX_TRIAL_SESSIONS} ---`);
+console.log(`--- 📊 LIMITS: FreeChat=${FREE_DAILY_LIMIT}, FreeAccessDays=${FREE_ACCESS_DAYS} ---`);
 
 if (!OPENAI_API_KEY) console.error("⚠️  MISSING: OPENAI_API_KEY");
 if (!RAZORPAY_KEY_ID) console.error("⚠️  MISSING: RAZORPAY_KEY_ID");
@@ -192,8 +195,9 @@ const conversationSchema = new mongoose.Schema({
 conversationSchema.index({ updatedAt: 1 }, { expireAfterSeconds: 86400 }); 
 const Conversation = mongoose.model("Conversation", conversationSchema);
 
-// --- NEW FEATURE: FREE REQUEST SCHEMA ---
+// --- FREE REQUEST SCHEMA (UPDATED) ---
 const freeRequestSchema = new mongoose.Schema({
+  googleId: { type: String, required: true }, // Linked to user
   name: { type: String, required: true },
   email: { type: String, required: true },
   whatsapp: { type: String, required: true },
@@ -1330,19 +1334,28 @@ app.post("/api/transcribe-draft", upload.single("file"), async (req, res) => {
   }
 });
 
-// --- NEW FEATURE: FREE REQUEST ENDPOINT ---
+// --- UPDATED: REQUEST ACCESS ENDPOINT (INSTANT ELITE ACCESS) ---
 app.post("/api/request-access", async (req, res) => {
   try {
-    const { name, email, whatsapp, yoe, targetRole } = req.body;
+    const { googleId, name, email, whatsapp, yoe, targetRole } = req.body;
     
-    // Validation
+    // 1. Validation
+    if (!googleId) {
+        return res.status(401).json({ error: "Please log in first." });
+    }
     if (!name || !email || !whatsapp || !yoe) {
       return res.status(400).json({ error: "All mandatory fields must be filled." });
     }
 
     const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
 
+    // 2. Find User
+    const user = await User.findOne({ googleId });
+    if (!user) return res.status(404).json({ error: "User not found." });
+
+    // 3. Save the request to DB for records
     const newRequest = new FreeRequest({
+      googleId,
       name,
       email,
       whatsapp,
@@ -1350,13 +1363,43 @@ app.post("/api/request-access", async (req, res) => {
       targetRole,
       ip
     });
-
     await newRequest.save();
+
+    // 4. GRANT ELITE ACCESS (pro_plus)
+    const daysToAdd = FREE_ACCESS_DAYS;
+    const validityDate = new Date();
+    validityDate.setDate(validityDate.getDate() + daysToAdd);
+
+    // Update user subscription
+    user.subscription.status = "active";
+    user.subscription.tier = "pro_plus";
+    user.subscription.cycle = "monthly"; // Display purposes
+    user.subscription.validUntil = validityDate;
+    user.subscription.isTrial = false; // Not a trial, full granted license
+
+    // Add record to orders so it appears in history
+    user.orders.push({
+        orderId: `grant_${Date.now()}`,
+        amount: 0,
+        currency: "USD",
+        date: new Date(),
+        status: "paid",
+        tier: "pro_plus",
+        method: "promotional_grant",
+        receipt: "FOMO_OFFER",
+        notes: { daysGranted: daysToAdd }
+    });
+
+    await user.save();
     
-    // Simulate a slight delay for "Processing" effect
-    setTimeout(() => {
-        res.json({ success: true, message: "Application Submitted Successfully" });
-    }, 1000);
+    console.log(`[Promo] User ${user.email} granted ${daysToAdd} days of Elite access.`);
+
+    res.json({ 
+        success: true, 
+        message: `Elite Access Granted for ${daysToAdd} days!`,
+        tier: "pro_plus",
+        validUntil: validityDate
+    });
 
   } catch (err) {
     console.error("Free Request Error:", err);
