@@ -50,7 +50,7 @@ const MAX_TEXT_CHAR_LIMIT = parseInt(process.env.MAX_TEXT_CHAR_LIMIT || "4096", 
 const MAX_TRIAL_SESSIONS = parseInt(process.env.MAX_TRIAL_SESSIONS || "3", 10);
 const TRIAL_DURATION_MINUTES = 10; 
 
-// --- NEW: FREE ACCESS CAMPAIGN (DAYS) ---
+// --- NEW: FREE ACCESS CAMPAIGN (INSTANT UPGRADE) ---
 const FREE_ACCESS_DAYS = parseInt(process.env.FREE_ACCESS_DAYS || "30", 10);
 
 // --- NEW: PAID MIC LIMIT (MONTHLY) ---
@@ -195,9 +195,9 @@ const conversationSchema = new mongoose.Schema({
 conversationSchema.index({ updatedAt: 1 }, { expireAfterSeconds: 86400 }); 
 const Conversation = mongoose.model("Conversation", conversationSchema);
 
-// --- FREE REQUEST SCHEMA (UPDATED) ---
+// --- FREE REQUEST SCHEMA (Updated to link googleId) ---
 const freeRequestSchema = new mongoose.Schema({
-  googleId: { type: String, required: true }, // Linked to user
+  googleId: { type: String, required: true },
   name: { type: String, required: true },
   email: { type: String, required: true },
   whatsapp: { type: String, required: true },
@@ -1334,26 +1334,26 @@ app.post("/api/transcribe-draft", upload.single("file"), async (req, res) => {
   }
 });
 
-// --- UPDATED: REQUEST ACCESS ENDPOINT (INSTANT ELITE ACCESS) ---
+// === UPDATED: REQUEST ACCESS ENDPOINT (INSTANT UPGRADE) ===
 app.post("/api/request-access", async (req, res) => {
   try {
     const { googleId, name, email, whatsapp, yoe, targetRole } = req.body;
     
     // 1. Validation
     if (!googleId) {
-        return res.status(401).json({ error: "Please log in first." });
+        return res.status(401).json({ error: "Please log in to claim this offer." });
     }
     if (!name || !email || !whatsapp || !yoe) {
       return res.status(400).json({ error: "All mandatory fields must be filled." });
     }
 
-    const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
-
     // 2. Find User
     const user = await User.findOne({ googleId });
-    if (!user) return res.status(404).json({ error: "User not found." });
+    if (!user) return res.status(404).json({ error: "User record not found." });
 
-    // 3. Save the request to DB for records
+    // 3. Save the Request (Marketing Data)
+    const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
+    
     const newRequest = new FreeRequest({
       googleId,
       name,
@@ -1363,21 +1363,21 @@ app.post("/api/request-access", async (req, res) => {
       targetRole,
       ip
     });
+
     await newRequest.save();
 
-    // 4. GRANT ELITE ACCESS (pro_plus)
-    const daysToAdd = FREE_ACCESS_DAYS;
+    // 4. Grant Elite Access
+    const daysToAdd = FREE_ACCESS_DAYS; 
     const validityDate = new Date();
     validityDate.setDate(validityDate.getDate() + daysToAdd);
 
-    // Update user subscription
     user.subscription.status = "active";
-    user.subscription.tier = "pro_plus";
-    user.subscription.cycle = "monthly"; // Display purposes
+    user.subscription.tier = "pro_plus"; // Elite Tier
+    user.subscription.cycle = "monthly"; // Treat as monthly for display
     user.subscription.validUntil = validityDate;
-    user.subscription.isTrial = false; // Not a trial, full granted license
+    user.subscription.isTrial = false; // It's a full granted license, not a 10-min trial
 
-    // Add record to orders so it appears in history
+    // Add a fake order record so it shows up in history
     user.orders.push({
         orderId: `grant_${Date.now()}`,
         amount: 0,
@@ -1403,7 +1403,7 @@ app.post("/api/request-access", async (req, res) => {
 
   } catch (err) {
     console.error("Free Request Error:", err);
-    res.status(500).json({ error: "Submission failed. Try again." });
+    res.status(500).json({ error: "Submission failed. Please try again." });
   }
 });
 
