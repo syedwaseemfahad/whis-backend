@@ -260,6 +260,8 @@ app.use((req, res, next) => {
 
 app.use(express.static(__dirname));
 
+
+
 // === CRITICAL: ATOMIC USAGE CHECKER ===
 async function checkAndIncrementUsage(googleId) {
   const today = new Date().toISOString().slice(0, 10);
@@ -283,6 +285,31 @@ async function checkAndIncrementUsage(googleId) {
           { new: true }
       );
   }
+
+  // --- NEW: UPDATE WHATSAPP NUMBER ---
+app.post("/api/user/update-phone", async (req, res) => {
+  try {
+    const { googleId, phone } = req.body;
+    if (!googleId || !phone) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    const updatedUser = await User.findOneAndUpdate(
+      { googleId: googleId },
+      { phone: phone },
+      { new: true }
+    );
+
+    if (!updatedUser) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    res.json({ success: true, user: updatedUser });
+  } catch (err) {
+    console.error("Update Phone Error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
 
   // 3. Status Check (Active Paid OR Active Trial)
   let isTrialActive = user.subscription.isTrial && user.subscription.validUntil && new Date() < user.subscription.validUntil;
