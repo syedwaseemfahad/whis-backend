@@ -408,18 +408,15 @@ async function getPayPalAccessToken() {
 
 // ================= COUPON LOGIC (TIME SENSITIVE) =================
 
-// Helper: Generates code based on strictly Identifier (Phone/Email) + Current Date + Hour
 function generateCoupon(identifier) {
     if (!identifier) return null;
     
     const now = new Date();
-    // Using UTC to ensure consistency across servers
     const day = String(now.getUTCDate()).padStart(2, '0');
     const month = String(now.getUTCMonth() + 1).padStart(2, '0');
     const year = now.getUTCFullYear();
-    const hour = now.getUTCHours(); // 24h format
+    const hour = now.getUTCHours(); 
     
-    // Construct String: "whatsapp_number|16/02/2026|14"
     const dataString = `${identifier.trim().toLowerCase()}|${day}/${month}/${year}|${hour}`;
     
     const hash = crypto.createHmac('sha256', COUPON_SECRET)
@@ -431,7 +428,6 @@ function generateCoupon(identifier) {
     return `WHIS-${hash}`;
 }
 
-// Validates strictly against the CURRENT time (Realtime validation)
 function validateCoupon(code, identifier) {
     if (!code || !identifier) return false;
     const validCode = generateCoupon(identifier);
@@ -458,13 +454,9 @@ app.get("/api/config", (req, res) => {
     });
 });
 
-// --- NEW COUPON ENDPOINTS ---
 app.post("/api/coupon/generate", (req, res) => {
-    // Accepts email OR whatsapp as identifier
     const identifier = req.body.email || req.body.whatsapp || req.body.phone;
-    
     if (!identifier) return res.status(400).json({ error: "Identifier (Email/Phone) required" });
-    
     const code = generateCoupon(identifier);
     res.json({ success: true, code, discount: "20%" });
 });
@@ -472,17 +464,13 @@ app.post("/api/coupon/generate", (req, res) => {
 app.post("/api/coupon/validate", (req, res) => {
     const { code, email, whatsapp, phone } = req.body;
     const identifier = email || whatsapp || phone;
-    
     const isValid = validateCoupon(code, identifier);
     res.json({ valid: isValid, discount: isValid ? 20 : 0 });
 });
 
-// --- LEAD CAPTURE ENDPOINT ---
 app.post("/api/leads/add", async (req, res) => {
     try {
         const { phone, whatsapp, email, source, googleId } = req.body;
-        
-        // Normalize phone/whatsapp
         const phoneToSave = phone || whatsapp;
         
         if (!phoneToSave && !email) return res.status(400).json({ error: "Phone or Email required" });
@@ -917,7 +905,7 @@ app.delete("/api/user/context/:id", async (req, res) => {
 
 app.post("/api/payment/create-order", async (req, res) => {
   try {
-    const { googleId, tier, cycle, couponCode } = req.body; 
+    const { googleId, tier, cycle, couponCode, couponIdentifier } = req.body; 
     const user = await User.findOne({ googleId });
     if (!user) return res.status(404).json({ error: "User not found" });
 
@@ -939,11 +927,15 @@ app.post("/api/payment/create-order", async (req, res) => {
 
     // === COUPON APPLICATION ===
     if (couponCode) {
-        // Validation matches against email or phone
-        const validWithEmail = validateCoupon(couponCode, user.email);
-        const validWithPhone = validateCoupon(couponCode, user.phone);
+        // Try validating against the provided identifier, or user's registered info
+        const identifier = couponIdentifier || user.email || user.phone;
+        const valid = validateCoupon(couponCode, identifier);
         
-        if (validWithEmail || validWithPhone) {
+        // Fallback checks just in case user mixed up methods
+        const validEmail = validateCoupon(couponCode, user.email);
+        const validPhone = validateCoupon(couponCode, user.phone);
+
+        if (valid || validEmail || validPhone) {
             finalAmount = finalAmount * 0.8; // 20% Discount
         }
     }
@@ -1048,7 +1040,7 @@ app.post("/api/payment/verify", async (req, res) => {
 
 app.post("/api/payment/create-paypal-order", async (req, res) => {
   try {
-    const { googleId, tier, cycle, couponCode } = req.body;
+    const { googleId, tier, cycle, couponCode, couponIdentifier } = req.body;
     const user = await User.findOne({ googleId });
     if (!user) return res.status(404).json({ error: "User not found" });
 
@@ -1070,11 +1062,13 @@ app.post("/api/payment/create-paypal-order", async (req, res) => {
 
     // === COUPON APPLICATION ===
     if (couponCode) {
-        // Try validating against either email or phone
-        const validWithEmail = validateCoupon(couponCode, user.email);
-        const validWithPhone = validateCoupon(couponCode, user.phone);
-        
-        if (validWithEmail || validWithPhone) {
+        const identifier = couponIdentifier || user.email || user.phone;
+        const valid = validateCoupon(couponCode, identifier);
+        // Fallback checks
+        const validEmail = validateCoupon(couponCode, user.email);
+        const validPhone = validateCoupon(couponCode, user.phone);
+
+        if (valid || validEmail || validPhone) {
             finalAmountUSD = finalAmountUSD * 0.8; 
         }
     }
