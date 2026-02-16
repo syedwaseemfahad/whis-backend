@@ -102,7 +102,7 @@ mongoose
 
 // --- 2. SCHEMAS ---
 
-// NEW: Lead Schema
+// NEW: Lead Schema (Restored)
 const leadSchema = new mongoose.Schema({
     phone: String,
     email: String,
@@ -277,7 +277,6 @@ async function checkAndIncrementUsage(googleId) {
   let isPaidActive = user.subscription.status === 'active';
 
   if (isPaidActive && user.subscription.validUntil && new Date() > user.subscription.validUntil) {
-      console.log(`[Sub] Expired for ${googleId}. Downgrading.`);
       await User.updateOne({ googleId }, { 
           $set: { 
              "subscription.status": "inactive", 
@@ -459,7 +458,7 @@ app.get("/api/config", (req, res) => {
     });
 });
 
-// --- NEW COUPON ENDPOINTS ---
+// --- NEW COUPON ENDPOINTS (Restored) ---
 app.post("/api/coupon/generate", (req, res) => {
     // Accepts email OR whatsapp as identifier
     const identifier = req.body.email || req.body.whatsapp || req.body.phone;
@@ -478,7 +477,7 @@ app.post("/api/coupon/validate", (req, res) => {
     res.json({ valid: isValid, discount: isValid ? 20 : 0 });
 });
 
-// --- LEAD CAPTURE ENDPOINT ---
+// --- LEAD CAPTURE ENDPOINT (Restored) ---
 app.post("/api/leads/add", async (req, res) => {
     try {
         const { phone, whatsapp, email, source, googleId } = req.body;
