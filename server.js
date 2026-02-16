@@ -407,11 +407,11 @@ async function getPayPalAccessToken() {
     return data.access_token;
 }
 
-// ================= COUPON LOGIC (UPDATED) =================
+// ================= COUPON LOGIC (UPDATED: TIME SENSITIVE) =================
 
-// Helper: Generates code based on strictly Email + Current Date + Hour
-function generateCoupon(email) {
-    if (!email) return null;
+// Helper: Generates code based on strictly Identifier (Phone/Email) + Current Date + Hour
+function generateCoupon(identifier) {
+    if (!identifier) return null;
     
     const now = new Date();
     // Using UTC to ensure consistency across servers/deployments
@@ -420,22 +420,22 @@ function generateCoupon(email) {
     const year = now.getUTCFullYear();
     const hour = now.getUTCHours(); // 24h format
     
-    // Construct String: "email|16/02/2026|14"
-    const dataString = `${email.trim().toLowerCase()}|${day}/${month}/${year}|${hour}`;
+    // Construct String: "phone|16/02/2026|14"
+    const dataString = `${identifier.trim().toLowerCase()}|${day}/${month}/${year}|${hour}`;
     
     const hash = crypto.createHmac('sha256', COUPON_SECRET)
                        .update(dataString)
                        .digest('hex')
-                       .substring(0, 8) // 8 char code
+                       .substring(0, 8) // 8 char unique code
                        .toUpperCase();
                        
     return `WHIS-${hash}`;
 }
 
 // Validates strictly against the CURRENT time (Realtime validation)
-function validateCoupon(code, email) {
-    if (!code || !email) return false;
-    const validCode = generateCoupon(email);
+function validateCoupon(code, identifier) {
+    if (!code || !identifier) return false;
+    const validCode = generateCoupon(identifier);
     return code === validCode;
 }
 
@@ -461,33 +461,47 @@ app.get("/api/config", (req, res) => {
 
 // --- NEW COUPON ENDPOINTS ---
 app.post("/api/coupon/generate", (req, res) => {
-    const { email } = req.body;
-    if (!email) return res.status(400).json({ error: "Email required" });
-    const code = generateCoupon(email);
+    // Accepts email OR whatsapp as identifier
+    const identifier = req.body.email || req.body.whatsapp || req.body.phone;
+    
+    if (!identifier) return res.status(400).json({ error: "Identifier (Email/Phone) required" });
+    
+    const code = generateCoupon(identifier);
     res.json({ success: true, code, discount: "20%" });
 });
 
 app.post("/api/coupon/validate", (req, res) => {
-    const { code, email } = req.body;
-    const isValid = validateCoupon(code, email);
+    const { code, email, whatsapp, phone } = req.body;
+    const identifier = email || whatsapp || phone;
+    
+    const isValid = validateCoupon(code, identifier);
     res.json({ valid: isValid, discount: isValid ? 20 : 0 });
 });
 
 // --- LEAD CAPTURE ENDPOINT ---
 app.post("/api/leads/add", async (req, res) => {
     try {
-        const { phone, email, source, googleId } = req.body;
-        if (!phone && !email) return res.status(400).json({ error: "Phone or Email required" });
+        const { phone, whatsapp, email, source, googleId } = req.body;
+        
+        // Normalize phone/whatsapp
+        const phoneToSave = phone || whatsapp;
+        
+        if (!phoneToSave && !email) return res.status(400).json({ error: "Phone or Email required" });
         
         const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
 
         if (googleId) {
             const updates = {};
-            if(phone) updates.phone = phone;
+            if(phoneToSave) updates.phone = phoneToSave;
             await User.findOneAndUpdate({ googleId }, updates);
         }
 
-        const newLead = new Lead({ phone, email, source, ip });
+        const newLead = new Lead({ 
+            phone: phoneToSave, 
+            email, 
+            source, 
+            ip 
+        });
         await newLead.save();
 
         res.json({ success: true });
@@ -926,7 +940,13 @@ app.post("/api/payment/create-order", async (req, res) => {
 
     // === COUPON APPLICATION (Strict Validation) ===
     if (couponCode) {
-        if (validateCoupon(couponCode, user.email)) {
+        // We use either user.phone or user.email to validate depending on what they signed up with/added
+        // The coupon logic is generic on identifier now.
+        // Try matching against email first, then phone.
+        const validWithEmail = validateCoupon(couponCode, user.email);
+        const validWithPhone = validateCoupon(couponCode, user.phone);
+        
+        if (validWithEmail || validWithPhone) {
             finalAmount = finalAmount * 0.8; // 20% Discount
         }
     }
@@ -1053,7 +1073,11 @@ app.post("/api/payment/create-paypal-order", async (req, res) => {
 
     // === COUPON APPLICATION ===
     if (couponCode) {
-        if (validateCoupon(couponCode, user.email)) {
+        // Try validating against either
+        const validWithEmail = validateCoupon(couponCode, user.email);
+        const validWithPhone = validateCoupon(couponCode, user.phone);
+        
+        if (validWithEmail || validWithPhone) {
             finalAmountUSD = finalAmountUSD * 0.8; 
         }
     }
