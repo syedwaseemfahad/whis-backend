@@ -908,10 +908,12 @@ app.post("/api/payment/create-order", async (req, res) => {
      
     if (tier === "pro") {
         priceInfo = PRICING.pro;
-        basePrice = (cycle === "annual") ? (priceInfo.annual_per_month * 12) : priceInfo.monthly;
+        // <--- UPDATED to * 3 for Quarterly
+        basePrice = (cycle === "annual") ? (priceInfo.annual_per_month * 3) : priceInfo.monthly;
     } else if (tier === "pro_plus") {
         priceInfo = PRICING.pro_plus;
-        basePrice = (cycle === "annual") ? (priceInfo.annual_per_month * 12) : priceInfo.monthly;
+        // <--- UPDATED to * 3 for Quarterly
+        basePrice = (cycle === "annual") ? (priceInfo.annual_per_month * 3) : priceInfo.monthly;
     } else {
         return res.status(400).json({ error: "Invalid tier" });
     }
@@ -932,7 +934,8 @@ app.post("/api/payment/create-order", async (req, res) => {
         if (user.subscription.cycle === 'monthly') {
             oldBasePrice = PRICING.pro.monthly;
         } else {
-            oldBasePrice = PRICING.pro.annual_per_month * 12;
+            // <--- UPDATED to * 3 for Quarterly
+            oldBasePrice = PRICING.pro.annual_per_month * 3;
         }
 
         const oldDiscountAmount = (oldBasePrice * PRICING.pro.discount) / 100;
@@ -1005,7 +1008,8 @@ app.post("/api/payment/verify", async (req, res) => {
       user.subscription.cycle = order?.cycle || "monthly";
       user.subscription.isTrial = false; // Reset trial flag if paying
       
-      const days = order?.cycle === "annual" ? 365 : 30;
+      // <--- UPDATED: Annual now means Quarterly (90 days)
+      const days = order?.cycle === "annual" ? 90 : 30;
       user.subscription.validUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
 
       if (order) { order.status = "paid"; order.paymentId = razorpay_payment_id; order.signature = razorpay_signature; }
@@ -1030,10 +1034,12 @@ app.post("/api/payment/create-paypal-order", async (req, res) => {
 
     if (tier === "pro") {
         priceInfo = PRICING.pro;
-        basePrice = (cycle === "annual") ? (priceInfo.annual_per_month * 12) : priceInfo.monthly;
+        // <--- UPDATED to * 3 for Quarterly
+        basePrice = (cycle === "annual") ? (priceInfo.annual_per_month * 3) : priceInfo.monthly;
     } else if (tier === "pro_plus") {
         priceInfo = PRICING.pro_plus;
-        basePrice = (cycle === "annual") ? (priceInfo.annual_per_month * 12) : priceInfo.monthly;
+        // <--- UPDATED to * 3 for Quarterly
+        basePrice = (cycle === "annual") ? (priceInfo.annual_per_month * 3) : priceInfo.monthly;
     } else {
         return res.status(400).json({ error: "Invalid tier" });
     }
@@ -1050,7 +1056,8 @@ app.post("/api/payment/create-paypal-order", async (req, res) => {
         tier === 'pro_plus') {
         
         isUpgrade = true;
-        let oldBasePrice = (user.subscription.cycle === 'monthly') ? PRICING.pro.monthly : (PRICING.pro.annual_per_month * 12);
+        // <--- UPDATED to * 3 for Quarterly upgrade credit
+        let oldBasePrice = (user.subscription.cycle === 'monthly') ? PRICING.pro.monthly : (PRICING.pro.annual_per_month * 3);
         const oldDiscountAmount = (oldBasePrice * PRICING.pro.discount) / 100;
         oldPlanCredit = oldBasePrice - oldDiscountAmount;
         finalAmountUSD = finalAmountUSD - oldPlanCredit;
@@ -1138,7 +1145,8 @@ app.post("/api/payment/verify-paypal", async (req, res) => {
           user.subscription.cycle = dbOrder.cycle;
           user.subscription.isTrial = false; // Reset trial
           
-          const days = dbOrder.cycle === "annual" ? 365 : 30;
+          // <--- UPDATED: Annual now means Quarterly (90 days)
+          const days = dbOrder.cycle === "annual" ? 90 : 30;
           user.subscription.validUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
           
           await user.save();
