@@ -102,11 +102,11 @@ mongoose
 
 // --- 2. SCHEMAS ---
 
-// NEW: Lead Schema (Restored)
+// NEW: Lead Schema
 const leadSchema = new mongoose.Schema({
     phone: String,
     email: String,
-    source: String,
+    source: String, // 'download_gate' or 'coupon_bar'
     ip: String,
     createdAt: { type: Date, default: Date.now }
 });
@@ -406,26 +406,26 @@ async function getPayPalAccessToken() {
     return data.access_token;
 }
 
-// ================= COUPON LOGIC (UPDATED: TIME SENSITIVE) =================
+// ================= COUPON LOGIC (TIME SENSITIVE) =================
 
 // Helper: Generates code based on strictly Identifier (Phone/Email) + Current Date + Hour
 function generateCoupon(identifier) {
     if (!identifier) return null;
     
     const now = new Date();
-    // Using UTC to ensure consistency across servers/deployments
+    // Using UTC to ensure consistency across servers
     const day = String(now.getUTCDate()).padStart(2, '0');
     const month = String(now.getUTCMonth() + 1).padStart(2, '0');
     const year = now.getUTCFullYear();
     const hour = now.getUTCHours(); // 24h format
     
-    // Construct String: "phone|16/02/2026|14"
+    // Construct String: "whatsapp_number|16/02/2026|14"
     const dataString = `${identifier.trim().toLowerCase()}|${day}/${month}/${year}|${hour}`;
     
     const hash = crypto.createHmac('sha256', COUPON_SECRET)
                        .update(dataString)
                        .digest('hex')
-                       .substring(0, 8) // 8 char unique code
+                       .substring(0, 8) 
                        .toUpperCase();
                        
     return `WHIS-${hash}`;
@@ -458,7 +458,7 @@ app.get("/api/config", (req, res) => {
     });
 });
 
-// --- NEW COUPON ENDPOINTS (Restored) ---
+// --- NEW COUPON ENDPOINTS ---
 app.post("/api/coupon/generate", (req, res) => {
     // Accepts email OR whatsapp as identifier
     const identifier = req.body.email || req.body.whatsapp || req.body.phone;
@@ -477,7 +477,7 @@ app.post("/api/coupon/validate", (req, res) => {
     res.json({ valid: isValid, discount: isValid ? 20 : 0 });
 });
 
-// --- LEAD CAPTURE ENDPOINT (Restored) ---
+// --- LEAD CAPTURE ENDPOINT ---
 app.post("/api/leads/add", async (req, res) => {
     try {
         const { phone, whatsapp, email, source, googleId } = req.body;
@@ -722,7 +722,7 @@ app.get("/api/user/status", async (req, res) => {
   }
 });
 
-// === MIC ENDPOINTS (Fully Restored) ===
+// === MIC ENDPOINTS ===
 
 app.get("/api/user/mic/status", async (req, res) => {
   try {
@@ -818,7 +818,7 @@ app.post("/api/user/mic/consume", async (req, res) => {
 });
 
 
-// === CONTEXT API ENDPOINTS (Fully Restored) ===
+// === CONTEXT API ENDPOINTS ===
 
 app.get("/api/user/context", async (req, res) => {
   try {
@@ -937,11 +937,9 @@ app.post("/api/payment/create-order", async (req, res) => {
     const discountAmount = (basePrice * priceInfo.discount) / 100;
     let finalAmount = basePrice - discountAmount; 
 
-    // === COUPON APPLICATION (Strict Validation) ===
+    // === COUPON APPLICATION ===
     if (couponCode) {
-        // We use either user.phone or user.email to validate depending on what they signed up with/added
-        // The coupon logic is generic on identifier now.
-        // Try matching against email first, then phone.
+        // Validation matches against email or phone
         const validWithEmail = validateCoupon(couponCode, user.email);
         const validWithPhone = validateCoupon(couponCode, user.phone);
         
@@ -1072,7 +1070,7 @@ app.post("/api/payment/create-paypal-order", async (req, res) => {
 
     // === COUPON APPLICATION ===
     if (couponCode) {
-        // Try validating against either
+        // Try validating against either email or phone
         const validWithEmail = validateCoupon(couponCode, user.email);
         const validWithPhone = validateCoupon(couponCode, user.phone);
         
