@@ -36,9 +36,11 @@ const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
 const PAYPAL_CLIENT_ID = process.env.PAYPAL_CLIENT_ID;
 const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET;
 const PAYPAL_BASE_URL = process.env.PAYPAL_MODE === 'sandbox' ? "https://api-m.sandbox.paypal.com" : "https://api-m.paypal.com";
-// INR_TO_USD_RATE is no longer primary for conversion as base is USD, but kept for ref if needed
-const INR_TO_USD_RATE = 0.012; 
+
 const USD_TO_INR = parseFloat(process.env.USD_TO_INR || "90");
+
+// --- COUPON SECRET ---
+const COUPON_SECRET = process.env.COUPON_SECRET || "whis-secret-coupon-hash-99";
 
 // --- LIMITS & TRIAL CONFIGURATION ---
 const FREE_DAILY_LIMIT = parseInt(process.env.FREE_DAILY_LIMIT || "10", 10);
@@ -55,15 +57,16 @@ const PAID_MIC_LIMIT_MINUTES = parseInt(process.env.PAID_MIC_LIMIT_MINUTES || "3
 const PAID_MIC_LIMIT_SECONDS = PAID_MIC_LIMIT_MINUTES * 60;
 
 // --- PRICING CONFIGURATION (VALUES IN USD) ---
+// Note: 'annual_per_month' is used here to represent the Quarterly per-month rate logic
 const PRICING = {
   pro: {
-    monthly: parseFloat(process.env.PRO_PER_MONTH), 
-    annual_per_month: parseFloat(process.env.PRO_YEAR_PER_MONTH),
+    monthly: parseFloat(process.env.PRO_PER_MONTH || "29"), 
+    annual_per_month: parseFloat(process.env.PRO_YEAR_PER_MONTH || "15"),
     discount: parseFloat(process.env.PRO_DISCOUNT || 0)
   },
   pro_plus: {
-    monthly: parseFloat(process.env.PROPLUS_PER_MONTH), 
-    annual_per_month: parseFloat(process.env.PROPLUS_YEAR_PER_MONTH),
+    monthly: parseFloat(process.env.PROPLUS_PER_MONTH || "49"), 
+    annual_per_month: parseFloat(process.env.PROPLUS_YEAR_PER_MONTH || "25"),
     discount: parseFloat(process.env.PROPLUS_DISCOUNT || 0)
   }
 };
@@ -76,11 +79,6 @@ if (!OPENAI_API_KEY) console.error("⚠️  MISSING: OPENAI_API_KEY");
 if (!RAZORPAY_KEY_ID) console.error("⚠️  MISSING: RAZORPAY_KEY_ID");
 if (!PAYPAL_CLIENT_ID) console.error("⚠️  MISSING: PAYPAL_CLIENT_ID");
 if (!GOOGLE_CLIENT_ID) console.error("⚠️  MISSING: GOOGLE_CLIENT_ID");
-if (!GOOGLE_CLIENT_SECRET) console.error("⚠️  MISSING: GOOGLE_CLIENT_SECRET");
-
-if (isNaN(PRICING.pro.monthly) || isNaN(PRICING.pro_plus.monthly)) {
-    console.error("❌ CRITICAL: Pricing Environment Variables are missing or invalid!");
-}
 
 const razorpay = new Razorpay({
   key_id: RAZORPAY_KEY_ID,
@@ -104,6 +102,17 @@ mongoose
   .catch((err) => console.error("❌ [DB] Connection Failed:", err));
 
 // --- 2. SCHEMAS ---
+
+// NEW: Lead Schema
+const leadSchema = new mongoose.Schema({
+    phone: String,
+    email: String,
+    source: String, // 'download_gate' or 'coupon_bar'
+    ip: String,
+    createdAt: { type: Date, default: Date.now }
+});
+const Lead = mongoose.model("Lead", leadSchema);
+
 const metricSchema = new mongoose.Schema({
   date: { type: String, required: true },
   ip: { type: String, required: true },
@@ -135,9 +144,8 @@ const userSchema = new mongoose.Schema({
     tier: { type: String, enum: ["free", "pro", "pro_plus"], default: "free" },
     cycle: { type: String, enum: ["monthly", "annual"], default: "monthly" },
     validUntil: Date,
-    isTrial: { type: Boolean, default: false } // Track if current status is a trial
+    isTrial: { type: Boolean, default: false }
   },
-  // NEW: Track specific trial sessions
   trialUsage: {
     count: { type: Number, default: 0 }
   },
@@ -149,22 +157,19 @@ const userSchema = new mongoose.Schema({
     count: { type: Number, default: 0 },
     lastDate: { type: String }
   },
-  // NEW: Paid mic usage tracking (monthly)
   micUsage: {
-    monthKey: { type: String }, // e.g., "2025-12"
+    monthKey: { type: String }, 
     secondsUsed: { type: Number, default: 0 }
   },
-  // --- CONTEXT FEATURE ---
   contexts: [
     {
-      id: { type: String, required: true }, // uuid
-      name: { type: String, required: true }, // e.g., "Resume", "Job Desc"
+      id: { type: String, required: true }, 
+      name: { type: String, required: true }, 
       content: { type: String, required: true },
       isActive: { type: Boolean, default: false },
       updatedAt: { type: Date, default: Date.now }
     }
   ],
-  // ---------------------------
   orders: [
     {
       orderId: String, paymentId: String, signature: String, amount: Number,
@@ -192,7 +197,6 @@ const conversationSchema = new mongoose.Schema({
 conversationSchema.index({ updatedAt: 1 }, { expireAfterSeconds: 86400 }); 
 const Conversation = mongoose.model("Conversation", conversationSchema);
 
-// --- NEW FEATURE: FREE REQUEST SCHEMA ---
 const freeRequestSchema = new mongoose.Schema({
   name: { type: String, required: true },
   email: { type: String, required: true },
@@ -260,17 +264,13 @@ app.use((req, res, next) => {
 
 app.use(express.static(__dirname));
 
-
-
-// === CRITICAL: ATOMIC USAGE CHECKER ===
+// === ATOMIC USAGE CHECKER ===
 async function checkAndIncrementUsage(googleId) {
   const today = new Date().toISOString().slice(0, 10);
   
-  // 1. Fetch User Data
   let user = await User.findOne({ googleId });
   if (!user) return { allowed: false, error: "User not found" };
 
-  // 2. Daily Reset - Atomic Operation
   if (user.freeUsage.lastDate !== today) {
       user = await User.findOneAndUpdate(
           { googleId },
@@ -286,38 +286,11 @@ async function checkAndIncrementUsage(googleId) {
       );
   }
 
-  // --- NEW: UPDATE WHATSAPP NUMBER ---
-app.post("/api/user/update-phone", async (req, res) => {
-  try {
-    const { googleId, phone } = req.body;
-    if (!googleId || !phone) {
-      return res.status(400).json({ error: "Missing required fields" });
-    }
-
-    const updatedUser = await User.findOneAndUpdate(
-      { googleId: googleId },
-      { phone: phone },
-      { new: true }
-    );
-
-    if (!updatedUser) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    res.json({ success: true, user: updatedUser });
-  } catch (err) {
-    console.error("Update Phone Error:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-  // 3. Status Check (Active Paid OR Active Trial)
   let isTrialActive = user.subscription.isTrial && user.subscription.validUntil && new Date() < user.subscription.validUntil;
   let isPaidActive = user.subscription.status === 'active';
 
-  // Handle Expired Paid Subscription (Downgrade Immediately)
   if (isPaidActive && user.subscription.validUntil && new Date() > user.subscription.validUntil) {
-      console.log(`[Sub] Expired for ${googleId}. Downgrading to free.`);
+      console.log(`[Sub] Expired for ${googleId}. Downgrading.`);
       await User.updateOne({ googleId }, { 
           $set: { 
              "subscription.status": "inactive", 
@@ -329,14 +302,10 @@ app.post("/api/user/update-phone", async (req, res) => {
       isTrialActive = false;
   }
 
-  // If Premium or Valid Trial -> Allow (No increment of free counter)
   if (isPaidActive || isTrialActive) {
       return { allowed: true, tier: user.subscription.tier };
   }
 
-  // 4. Free Tier - ATOMIC INCREMENT
-  // This is the CRITICAL FIX. The query strictly requires count < LIMIT.
-  // It increments and returns the new document ONLY if condition met.
   const result = await User.findOneAndUpdate(
       { 
           googleId: googleId, 
@@ -353,7 +322,7 @@ app.post("/api/user/update-phone", async (req, res) => {
   }
 }
 
-// === NEW: PAID MIC USAGE HELPERS (MONTHLY) ===
+// === PAID MIC USAGE HELPERS ===
 function getMonthKey(d = new Date()) {
   const year = d.getUTCFullYear();
   const month = String(d.getUTCMonth() + 1).padStart(2, "0");
@@ -361,7 +330,6 @@ function getMonthKey(d = new Date()) {
 }
 
 function isPaidMicEnforced(user) {
-  // Enforce only for real paid active subscriptions (NOT trial)
   return (
     user &&
     user.subscription &&
@@ -388,8 +356,6 @@ function computeMicRemainingSeconds(user) {
   return Math.max(0, PAID_MIC_LIMIT_SECONDS - used);
 }
 
-
-// === CRITICAL: ATOMIC SCREENSHOT CHECKER ===
 async function checkScreenshotLimit(googleId) {
     const today = new Date().toISOString().slice(0, 10);
     const user = await User.findOne({ googleId });
@@ -399,7 +365,6 @@ async function checkScreenshotLimit(googleId) {
         user.screenshotUsage = { count: 0, lastDate: today };
     }
 
-    // Daily Reset check handled in usage check, but good to be safe
     if (user.screenshotUsage.lastDate !== today) {
         user.screenshotUsage.count = 0;
         user.screenshotUsage.lastDate = today;
@@ -411,7 +376,6 @@ async function checkScreenshotLimit(googleId) {
     
     const limit = isPaid ? PAID_SCREENSHOT_LIMIT : FREE_SCREENSHOT_LIMIT;
 
-    // Atomic Increment with Limit Check
     const result = await User.findOneAndUpdate(
         { 
             googleId: googleId, 
@@ -456,6 +420,24 @@ async function getPayPalAccessToken() {
     return data.access_token;
 }
 
+// === COUPON HELPERS ===
+function generateCoupon(email) {
+    if (!email) return null;
+    const hour = new Date().getUTCHours();
+    // Simple hash: email + hour + secret (valid for 1 hour)
+    const hash = crypto.createHmac('sha256', COUPON_SECRET)
+                       .update(`${email.trim().toLowerCase()}-${hour}`)
+                       .digest('hex').substring(0, 6).toUpperCase();
+    return `WHIS${hash}`;
+}
+
+function validateCoupon(code, email) {
+    if (!code || !email) return false;
+    const validCode = generateCoupon(email);
+    // Allow matching the code (In production, could check if hour passed, but this hash rotates hourly)
+    return code === validCode;
+}
+
 // ================= ROUTES =================
 
 app.get("/ping", (req, res) => res.send("pong"));
@@ -463,7 +445,7 @@ app.get("/ping", (req, res) => res.send("pong"));
 app.get("/api/config", (req, res) => {
     res.json({
         pricing: PRICING,
-        exchangeRate: USD_TO_INR, // <--- ADDED EXCHANGE RATE HERE FOR FRONTEND
+        exchangeRate: USD_TO_INR,
         googleClientId: GOOGLE_CLIENT_ID,
         websitePricingUrl: WEBSITE_PRICING_URL,
         limits: {
@@ -474,6 +456,48 @@ app.get("/api/config", (req, res) => {
             maxTrialSessions: MAX_TRIAL_SESSIONS
         }
     });
+});
+
+// --- NEW COUPON ENDPOINTS ---
+app.post("/api/coupon/generate", (req, res) => {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: "Email required" });
+    const code = generateCoupon(email);
+    res.json({ success: true, code, discount: "20%" });
+});
+
+app.post("/api/coupon/validate", (req, res) => {
+    const { code, email } = req.body;
+    const isValid = validateCoupon(code, email);
+    res.json({ valid: isValid, discount: isValid ? 20 : 0 });
+});
+
+// --- NEW LEAD ENDPOINT ---
+app.post("/api/leads/add", async (req, res) => {
+    try {
+        const { phone, email, source, googleId } = req.body;
+        // Phone or Email is required depending on the source
+        if (!phone && !email) return res.status(400).json({ error: "Phone or Email required" });
+        
+        const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
+
+        // 1. If user is logged in, update their profile
+        if (googleId) {
+            const updates = {};
+            if(phone) updates.phone = phone;
+            // Don't overwrite email usually, but can if needed
+            await User.findOneAndUpdate({ googleId }, updates);
+        }
+
+        // 2. Always save to Lead collection
+        const newLead = new Lead({ phone, email, source, ip });
+        await newLead.save();
+
+        res.json({ success: true });
+    } catch (err) {
+        console.error("Lead Error:", err);
+        res.status(500).json({ error: "Failed to save lead" });
+    }
 });
 
 app.post("/api/auth/google", async (req, res) => {
@@ -515,7 +539,6 @@ app.post("/api/auth/google", async (req, res) => {
 
     const newSessionId = crypto.randomUUID();
 
-    // New users start as Free Tier (Inactive)
     const user = await User.findOneAndUpdate(
       { googleId },
       {
@@ -525,7 +548,6 @@ app.post("/api/auth/google", async (req, res) => {
           "subscription.status": "inactive", 
           "subscription.tier": "free",
           "trialUsage.count": 0,
-          
           "freeUsage.count": 0, "freeUsage.lastDate": new Date().toISOString().slice(0, 10),
           "screenshotUsage.count": 0, "screenshotUsage.lastDate": new Date().toISOString().slice(0, 10)
         }
@@ -540,7 +562,24 @@ app.post("/api/auth/google", async (req, res) => {
   }
 });
 
-// === NEW: ACTIVATE 10-MIN ON-DEMAND TRIAL ===
+app.post("/api/user/update-phone", async (req, res) => {
+  try {
+    const { googleId, phone } = req.body;
+    if (!googleId || !phone) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+    const updatedUser = await User.findOneAndUpdate(
+      { googleId: googleId },
+      { phone: phone },
+      { new: true }
+    );
+    if (!updatedUser) return res.status(404).json({ error: "User not found" });
+    res.json({ success: true, user: updatedUser });
+  } catch (err) {
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 app.post("/api/user/trial/start", async (req, res) => {
     try {
         const googleId = req.headers["x-google-id"];
@@ -559,7 +598,6 @@ app.post("/api/user/trial/start", async (req, res) => {
         const now = new Date();
         const expiry = new Date(now.getTime() + (TRIAL_DURATION_MINUTES * 60 * 1000)); 
 
-        // Set Trial Flags but NOT status='active' (to keep website pricing visible)
         user.subscription.tier = tier;
         user.subscription.validUntil = expiry;
         user.subscription.isTrial = true; 
@@ -568,9 +606,6 @@ app.post("/api/user/trial/start", async (req, res) => {
         user.trialUsage.count += 1;
 
         await user.save();
-
-        console.log(`[Trial] User ${user.email} started trial #${user.trialUsage.count} as ${tier}`);
-
         res.json({ 
             success: true, 
             validUntil: expiry, 
@@ -579,13 +614,10 @@ app.post("/api/user/trial/start", async (req, res) => {
         });
 
     } catch (err) {
-        console.error("Trial Start Error:", err);
         res.status(500).json({ error: "Failed to start trial" });
     }
 });
 
-
-// === NEW: MANUALLY END TRIAL ===
 app.post("/api/user/trial/end", async (req, res) => {
     try {
         const googleId = req.headers["x-google-id"];
@@ -600,44 +632,33 @@ app.post("/api/user/trial/end", async (req, res) => {
             user.subscription.isTrial = false;
             
             await user.save();
-            console.log(`[Trial] User ${user.email} ended trial early.`);
             return res.json({ success: true });
         }
-
         return res.json({ success: false, message: "Not in an active trial" });
     } catch (err) {
-        console.error("End Trial Error:", err);
         res.status(500).json({ error: "Failed to end trial" });
     }
 });
-
 
 app.post("/api/auth/session/rotate", async (req, res) => {
     try {
         const googleId = req.headers["x-google-id"];
         if(!googleId) return res.status(400).json({ error: "Missing ID" });
-
         const newSessionId = crypto.randomUUID();
-        
         await User.findOneAndUpdate(
             { googleId },
             { currentSessionId: newSessionId }
         );
-
         res.json({ success: true, newSessionId });
     } catch(err) {
-        console.error("Rotation error:", err);
         res.status(500).json({ error: "Rotation failed" });
     }
 });
-
 
 app.get("/api/user/status", async (req, res) => {
   try {
     const googleId = req.headers["x-google-id"];
     const incomingSessionId = req.headers["x-session-id"];
-    
-    // Check if the request is from the App (via special header) or Website
     const isAppRequest = req.headers["x-whis-auth"] === APP_AUTH_TOKEN;
 
     if (!googleId) return res.status(401).json({ error: "Not authenticated" });
@@ -645,13 +666,11 @@ app.get("/api/user/status", async (req, res) => {
     const user = await User.findOne({ googleId });
     if (!user) return res.json({ active: false, tier: null });
 
-    // Session Mismatch Check
     if (user.currentSessionId && incomingSessionId && user.currentSessionId !== incomingSessionId) {
         return res.json({ sessionInvalid: true });
     }
 
     const now = new Date();
-    // Auto-downgrade check (handles trial expiry too)
     if (user.subscription.status === "active" && user.subscription.validUntil && now > user.subscription.validUntil) {
       user.subscription.status = "inactive";
       user.subscription.tier = "free";
@@ -662,21 +681,12 @@ app.get("/api/user/status", async (req, res) => {
     const isRealActive = user.subscription.status === "active";
     const isTrialValid = user.subscription.isTrial && user.subscription.validUntil && now < user.subscription.validUntil;
 
-    // Website view: Only report active if it's a REAL paid subscription
-    // App View: Report active if Paid OR Trial
-    let reportedActive = false;
-    if (isAppRequest) {
-        reportedActive = isRealActive || isTrialValid;
-    } else {
-        reportedActive = isRealActive;
-    }
+    let reportedActive = isAppRequest ? (isRealActive || isTrialValid) : isRealActive;
 
-    // NEW: Paid mic monthly usage (enforced only for active paid, not trial)
     const micUsageEnforced = isPaidMicEnforced(user);
     if (micUsageEnforced) {
       await normalizeMicUsageForMonth(user);
     } else if (!user.micUsage) {
-      // Ensure field exists for older users (no-op save)
       user.micUsage = { monthKey: getMonthKey(new Date()), secondsUsed: 0 };
     }
     const micRemainingSeconds = micUsageEnforced ? computeMicRemainingSeconds(user) : null;
@@ -685,7 +695,7 @@ app.get("/api/user/status", async (req, res) => {
       active: reportedActive,
       tier: user.subscription.tier,
       validUntil: user.subscription.validUntil,
-      isTrial: !!user.subscription.isTrial, // Return trial status
+      isTrial: !!user.subscription.isTrial, 
       trialUsage: user.trialUsage || { count: 0 },
       maxTrialSessions: MAX_TRIAL_SESSIONS,
       freeUsage: user.freeUsage,
@@ -694,6 +704,7 @@ app.get("/api/user/status", async (req, res) => {
       micLimitSeconds: PAID_MIC_LIMIT_SECONDS,
       micRemainingSeconds: micRemainingSeconds,
       micUsage: user.micUsage,
+      hasPhone: !!user.phone, // Send flag for strict gating
       orders: user.orders ? user.orders.sort((a,b) => new Date(b.date) - new Date(a.date)) : []
     });
   } catch (err) {
@@ -701,7 +712,8 @@ app.get("/api/user/status", async (req, res) => {
   }
 });
 
-// === NEW: PAID MIC USAGE API (MONTHLY) ===
+// === MIC ENDPOINTS (Fully Restored) ===
+
 app.get("/api/user/mic/status", async (req, res) => {
   try {
     const googleId = req.headers["x-google-id"];
@@ -714,7 +726,6 @@ app.get("/api/user/mic/status", async (req, res) => {
     const user = await User.findOne({ googleId });
     if (!user) return res.status(404).json({ error: "User not found" });
 
-    // Session Mismatch Check
     if (user.currentSessionId && incomingSessionId && user.currentSessionId !== incomingSessionId) {
       return res.json({ sessionInvalid: true });
     }
@@ -749,12 +760,11 @@ app.post("/api/user/mic/consume", async (req, res) => {
     if (!googleId) return res.status(401).json({ error: "Not authenticated" });
 
     const deltaSecondsRaw = req.body && typeof req.body.deltaSeconds === "number" ? req.body.deltaSeconds : 0;
-    const deltaSeconds = Math.max(0, Math.min(300, Math.floor(deltaSecondsRaw))); // clamp 0..300
+    const deltaSeconds = Math.max(0, Math.min(300, Math.floor(deltaSecondsRaw))); 
 
     const user = await User.findOne({ googleId });
     if (!user) return res.status(404).json({ error: "User not found" });
 
-    // Session Mismatch Check
     if (user.currentSessionId && incomingSessionId && user.currentSessionId !== incomingSessionId) {
       return res.json({ sessionInvalid: true });
     }
@@ -775,7 +785,6 @@ app.post("/api/user/mic/consume", async (req, res) => {
 
     const usedBefore = user.micUsage.secondsUsed || 0;
     const remainingBefore = Math.max(0, PAID_MIC_LIMIT_SECONDS - usedBefore);
-
     const countedSeconds = Math.min(deltaSeconds, remainingBefore);
 
     if (countedSeconds > 0) {
@@ -799,16 +808,14 @@ app.post("/api/user/mic/consume", async (req, res) => {
 });
 
 
-// === CONTEXT API ENDPOINTS ===
+// === CONTEXT API ENDPOINTS (Fully Restored) ===
 
 app.get("/api/user/context", async (req, res) => {
   try {
     const googleId = req.headers["x-google-id"];
     if (!googleId) return res.status(401).json({ error: "Unauthorized" });
-
     const user = await User.findOne({ googleId }, { contexts: 1 });
     if (!user) return res.status(404).json({ error: "User not found" });
-
     res.json({ contexts: user.contexts || [] });
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch contexts" });
@@ -896,30 +903,37 @@ app.delete("/api/user/context/:id", async (req, res) => {
   }
 });
 
+// === PAYMENT UPDATES (Quarterly + Coupon) ===
 
 app.post("/api/payment/create-order", async (req, res) => {
   try {
-    const { googleId, tier, cycle } = req.body; 
+    const { googleId, tier, cycle, couponCode } = req.body; 
     const user = await User.findOne({ googleId });
     if (!user) return res.status(404).json({ error: "User not found" });
 
     let priceInfo;
-    let basePrice = 0.00; // This is now in USD
+    let basePrice = 0.00; 
      
     if (tier === "pro") {
         priceInfo = PRICING.pro;
-        // <--- UPDATED to * 3 for Quarterly
+        // Annual here means Quarterly (3 months)
         basePrice = (cycle === "annual") ? (priceInfo.annual_per_month * 3) : priceInfo.monthly;
     } else if (tier === "pro_plus") {
         priceInfo = PRICING.pro_plus;
-        // <--- UPDATED to * 3 for Quarterly
         basePrice = (cycle === "annual") ? (priceInfo.annual_per_month * 3) : priceInfo.monthly;
     } else {
         return res.status(400).json({ error: "Invalid tier" });
     }
 
     const discountAmount = (basePrice * priceInfo.discount) / 100;
-    let finalAmount = basePrice - discountAmount; // Still in USD
+    let finalAmount = basePrice - discountAmount; 
+
+    // === COUPON APPLICATION ===
+    if (couponCode) {
+        if (validateCoupon(couponCode, user.email)) {
+            finalAmount = finalAmount * 0.8; // 20% Discount
+        }
+    }
 
     let isUpgrade = false;
     let oldPlanCredit = 0.00;
@@ -929,12 +943,10 @@ app.post("/api/payment/create-order", async (req, res) => {
         tier === 'pro_plus') {
         
         isUpgrade = true;
-        
         let oldBasePrice = 0.00;
         if (user.subscription.cycle === 'monthly') {
             oldBasePrice = PRICING.pro.monthly;
         } else {
-            // <--- UPDATED to * 3 for Quarterly
             oldBasePrice = PRICING.pro.annual_per_month * 3;
         }
 
@@ -945,8 +957,7 @@ app.post("/api/payment/create-order", async (req, res) => {
 
     if (finalAmount < 0) finalAmount = 0;
     
-    // --- CONVERSION TO INR FOR RAZORPAY ---
-    // finalAmount is in USD. We convert to INR using the new Env variable.
+    // Convert to INR
     const amountInINR = Math.floor(finalAmount * USD_TO_INR);
     const amountInPaise = amountInINR * 100; 
 
@@ -955,13 +966,13 @@ app.post("/api/payment/create-order", async (req, res) => {
         amount: amountInPaise, 
         currency: "INR", 
         receipt: receiptId, 
-        notes: { userId: googleId, tier, cycle, isUpgrade: isUpgrade, oldCredit: oldPlanCredit, basePriceUSD: basePrice } 
+        notes: { userId: googleId, tier, cycle, isUpgrade: isUpgrade, oldCredit: oldPlanCredit, couponCode: couponCode || "" } 
     };
 
     const order = await razorpay.orders.create(options);
     user.orders.push({ 
         orderId: order.id, 
-        amount: amountInINR, // Storing in INR since payment is INR
+        amount: amountInINR, 
         date: new Date(), 
         status: "created", 
         tier, 
@@ -1006,9 +1017,9 @@ app.post("/api/payment/verify", async (req, res) => {
       user.subscription.status = "active";
       user.subscription.tier = order?.tier || "pro";
       user.subscription.cycle = order?.cycle || "monthly";
-      user.subscription.isTrial = false; // Reset trial flag if paying
+      user.subscription.isTrial = false; 
       
-      // <--- UPDATED: Annual now means Quarterly (90 days)
+      // "Annual" variable used for Quarterly (90 days)
       const days = order?.cycle === "annual" ? 90 : 30;
       user.subscription.validUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
 
@@ -1025,28 +1036,32 @@ app.post("/api/payment/verify", async (req, res) => {
 
 app.post("/api/payment/create-paypal-order", async (req, res) => {
   try {
-    const { googleId, tier, cycle } = req.body;
+    const { googleId, tier, cycle, couponCode } = req.body;
     const user = await User.findOne({ googleId });
     if (!user) return res.status(404).json({ error: "User not found" });
 
     let priceInfo;
-    let basePrice = 0.00; // Base price is now USD
+    let basePrice = 0.00; 
 
     if (tier === "pro") {
         priceInfo = PRICING.pro;
-        // <--- UPDATED to * 3 for Quarterly
         basePrice = (cycle === "annual") ? (priceInfo.annual_per_month * 3) : priceInfo.monthly;
     } else if (tier === "pro_plus") {
         priceInfo = PRICING.pro_plus;
-        // <--- UPDATED to * 3 for Quarterly
         basePrice = (cycle === "annual") ? (priceInfo.annual_per_month * 3) : priceInfo.monthly;
     } else {
         return res.status(400).json({ error: "Invalid tier" });
     }
 
     const discountAmount = (basePrice * priceInfo.discount) / 100;
-    // Calculation remains in USD throughout
     let finalAmountUSD = basePrice - discountAmount; 
+
+    // === COUPON APPLICATION ===
+    if (couponCode) {
+        if (validateCoupon(couponCode, user.email)) {
+            finalAmountUSD = finalAmountUSD * 0.8; 
+        }
+    }
 
     let isUpgrade = false;
     let oldPlanCredit = 0.00;
@@ -1056,14 +1071,13 @@ app.post("/api/payment/create-paypal-order", async (req, res) => {
         tier === 'pro_plus') {
         
         isUpgrade = true;
-        // <--- UPDATED to * 3 for Quarterly upgrade credit
         let oldBasePrice = (user.subscription.cycle === 'monthly') ? PRICING.pro.monthly : (PRICING.pro.annual_per_month * 3);
         const oldDiscountAmount = (oldBasePrice * PRICING.pro.discount) / 100;
         oldPlanCredit = oldBasePrice - oldDiscountAmount;
         finalAmountUSD = finalAmountUSD - oldPlanCredit;
     }
      
-    if (finalAmountUSD < 0.1) finalAmountUSD = 0.10; // Minimum check
+    if (finalAmountUSD < 0.1) finalAmountUSD = 0.10; 
     
     const formattedAmountUSD = finalAmountUSD.toFixed(2);
 
@@ -1104,7 +1118,7 @@ app.post("/api/payment/create-paypal-order", async (req, res) => {
         cycle,
         receipt: `pp_${Date.now()}`,
         method: "paypal",
-        notes: { isUpgrade }
+        notes: { isUpgrade, couponCode }
     });
     await user.save();
 
@@ -1143,9 +1157,9 @@ app.post("/api/payment/verify-paypal", async (req, res) => {
           user.subscription.status = "active";
           user.subscription.tier = dbOrder.tier;
           user.subscription.cycle = dbOrder.cycle;
-          user.subscription.isTrial = false; // Reset trial
+          user.subscription.isTrial = false; 
           
-          // <--- UPDATED: Annual now means Quarterly (90 days)
+          // 90 days for quarterly
           const days = dbOrder.cycle === "annual" ? 90 : 30;
           user.subscription.validUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
           
@@ -1164,20 +1178,16 @@ app.post("/api/payment/verify-paypal", async (req, res) => {
 app.post("/api/chat-stream", async (req, res) => {
   const googleId = req.headers["x-google-id"];
   
-  // === CRITICAL SECURITY FIX ===
-  // Do not allow requests without googleId to bypass limits.
   if (!googleId) {
       return res.status(401).json({ error: "Unauthorized: Missing Google ID" });
   }
    
   const check = await checkAndIncrementUsage(googleId);
   if (!check.allowed) {
-      // Add a header so client can see specific failure reason if needed
       res.setHeader("x-limit-reached", "true");
       return res.status(403).json({ error: "Limit reached" });
   }
   
-  // Add header for Remaining Count so client can sync
   if(check.remaining !== undefined) {
       res.setHeader("x-remaining-free", check.remaining.toString());
   }
@@ -1196,7 +1206,6 @@ app.post("/api/chat-stream", async (req, res) => {
       }
   }
 
-  // --- 1. FETCH ACTIVE CONTEXT ---
   let systemContextMessage = null;
   if (googleId) {
      const user = await User.findOne({ googleId }, { contexts: 1 });
@@ -1365,12 +1374,10 @@ app.post("/api/transcribe-draft", upload.single("file"), async (req, res) => {
   }
 });
 
-// --- NEW FEATURE: FREE REQUEST ENDPOINT ---
 app.post("/api/request-access", async (req, res) => {
   try {
     const { name, email, whatsapp, yoe, targetRole } = req.body;
     
-    // Validation
     if (!name || !email || !whatsapp || !yoe) {
       return res.status(400).json({ error: "All mandatory fields must be filled." });
     }
@@ -1388,7 +1395,6 @@ app.post("/api/request-access", async (req, res) => {
 
     await newRequest.save();
     
-    // Simulate a slight delay for "Processing" effect
     setTimeout(() => {
         res.json({ success: true, message: "Application Submitted Successfully" });
     }, 1000);
