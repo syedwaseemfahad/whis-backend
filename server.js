@@ -57,7 +57,6 @@ const PAID_MIC_LIMIT_MINUTES = parseInt(process.env.PAID_MIC_LIMIT_MINUTES || "3
 const PAID_MIC_LIMIT_SECONDS = PAID_MIC_LIMIT_MINUTES * 60;
 
 // --- PRICING CONFIGURATION (VALUES IN USD) ---
-// Note: 'annual_per_month' is used here to represent the Quarterly per-month rate logic
 const PRICING = {
   pro: {
     monthly: parseFloat(process.env.PRO_PER_MONTH || "29"), 
@@ -107,7 +106,7 @@ mongoose
 const leadSchema = new mongoose.Schema({
     phone: String,
     email: String,
-    source: String, // 'download_gate' or 'coupon_bar'
+    source: String,
     ip: String,
     createdAt: { type: Date, default: Date.now }
 });
@@ -137,7 +136,6 @@ const userSchema = new mongoose.Schema({
   name: String,
   avatarUrl: String,
   phone: String,
-  // Session Control
   currentSessionId: { type: String, default: "" },
   subscription: {
     status: { type: String, enum: ["active", "inactive", "past_due"], default: "inactive" },
@@ -146,21 +144,10 @@ const userSchema = new mongoose.Schema({
     validUntil: Date,
     isTrial: { type: Boolean, default: false }
   },
-  trialUsage: {
-    count: { type: Number, default: 0 }
-  },
-  freeUsage: {
-    count: { type: Number, default: 0 },
-    lastDate: { type: String }
-  },
-  screenshotUsage: {
-    count: { type: Number, default: 0 },
-    lastDate: { type: String }
-  },
-  micUsage: {
-    monthKey: { type: String }, 
-    secondsUsed: { type: Number, default: 0 }
-  },
+  trialUsage: { count: { type: Number, default: 0 } },
+  freeUsage: { count: { type: Number, default: 0 }, lastDate: { type: String } },
+  screenshotUsage: { count: { type: Number, default: 0 }, lastDate: { type: String } },
+  micUsage: { monthKey: { type: String }, secondsUsed: { type: Number, default: 0 } },
   contexts: [
     {
       id: { type: String, required: true }, 
@@ -420,21 +407,35 @@ async function getPayPalAccessToken() {
     return data.access_token;
 }
 
-// === COUPON HELPERS ===
+// ================= COUPON LOGIC (UPDATED) =================
+
+// Helper: Generates code based on strictly Email + Current Date + Hour
 function generateCoupon(email) {
     if (!email) return null;
-    const hour = new Date().getUTCHours();
-    // Simple hash: email + hour + secret (valid for 1 hour)
+    
+    const now = new Date();
+    // Using UTC to ensure consistency across servers/deployments
+    const day = String(now.getUTCDate()).padStart(2, '0');
+    const month = String(now.getUTCMonth() + 1).padStart(2, '0');
+    const year = now.getUTCFullYear();
+    const hour = now.getUTCHours(); // 24h format
+    
+    // Construct String: "email|16/02/2026|14"
+    const dataString = `${email.trim().toLowerCase()}|${day}/${month}/${year}|${hour}`;
+    
     const hash = crypto.createHmac('sha256', COUPON_SECRET)
-                       .update(`${email.trim().toLowerCase()}-${hour}`)
-                       .digest('hex').substring(0, 6).toUpperCase();
-    return `WHIS${hash}`;
+                       .update(dataString)
+                       .digest('hex')
+                       .substring(0, 8) // 8 char code
+                       .toUpperCase();
+                       
+    return `WHIS-${hash}`;
 }
 
+// Validates strictly against the CURRENT time (Realtime validation)
 function validateCoupon(code, email) {
     if (!code || !email) return false;
     const validCode = generateCoupon(email);
-    // Allow matching the code (In production, could check if hour passed, but this hash rotates hourly)
     return code === validCode;
 }
 
@@ -472,24 +473,20 @@ app.post("/api/coupon/validate", (req, res) => {
     res.json({ valid: isValid, discount: isValid ? 20 : 0 });
 });
 
-// --- NEW LEAD ENDPOINT ---
+// --- LEAD CAPTURE ENDPOINT ---
 app.post("/api/leads/add", async (req, res) => {
     try {
         const { phone, email, source, googleId } = req.body;
-        // Phone or Email is required depending on the source
         if (!phone && !email) return res.status(400).json({ error: "Phone or Email required" });
         
         const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
 
-        // 1. If user is logged in, update their profile
         if (googleId) {
             const updates = {};
             if(phone) updates.phone = phone;
-            // Don't overwrite email usually, but can if needed
             await User.findOneAndUpdate({ googleId }, updates);
         }
 
-        // 2. Always save to Lead collection
         const newLead = new Lead({ phone, email, source, ip });
         await newLead.save();
 
@@ -704,7 +701,7 @@ app.get("/api/user/status", async (req, res) => {
       micLimitSeconds: PAID_MIC_LIMIT_SECONDS,
       micRemainingSeconds: micRemainingSeconds,
       micUsage: user.micUsage,
-      hasPhone: !!user.phone, // Send flag for strict gating
+      hasPhone: !!user.phone,
       orders: user.orders ? user.orders.sort((a,b) => new Date(b.date) - new Date(a.date)) : []
     });
   } catch (err) {
@@ -916,7 +913,6 @@ app.post("/api/payment/create-order", async (req, res) => {
      
     if (tier === "pro") {
         priceInfo = PRICING.pro;
-        // Annual here means Quarterly (3 months)
         basePrice = (cycle === "annual") ? (priceInfo.annual_per_month * 3) : priceInfo.monthly;
     } else if (tier === "pro_plus") {
         priceInfo = PRICING.pro_plus;
@@ -928,7 +924,7 @@ app.post("/api/payment/create-order", async (req, res) => {
     const discountAmount = (basePrice * priceInfo.discount) / 100;
     let finalAmount = basePrice - discountAmount; 
 
-    // === COUPON APPLICATION ===
+    // === COUPON APPLICATION (Strict Validation) ===
     if (couponCode) {
         if (validateCoupon(couponCode, user.email)) {
             finalAmount = finalAmount * 0.8; // 20% Discount
@@ -1019,7 +1015,6 @@ app.post("/api/payment/verify", async (req, res) => {
       user.subscription.cycle = order?.cycle || "monthly";
       user.subscription.isTrial = false; 
       
-      // "Annual" variable used for Quarterly (90 days)
       const days = order?.cycle === "annual" ? 90 : 30;
       user.subscription.validUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
 
@@ -1159,7 +1154,6 @@ app.post("/api/payment/verify-paypal", async (req, res) => {
           user.subscription.cycle = dbOrder.cycle;
           user.subscription.isTrial = false; 
           
-          // 90 days for quarterly
           const days = dbOrder.cycle === "annual" ? 90 : 30;
           user.subscription.validUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
           
