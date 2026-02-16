@@ -406,32 +406,41 @@ async function getPayPalAccessToken() {
     return data.access_token;
 }
 
-// ================= COUPON LOGIC (TIME SENSITIVE) =================
+// ================= COUPON LOGIC (BUFFERED TIME WINDOW) =================
 
-function generateCoupon(identifier) {
-    if (!identifier) return null;
-    
-    const now = new Date();
-    const day = String(now.getUTCDate()).padStart(2, '0');
-    const month = String(now.getUTCMonth() + 1).padStart(2, '0');
-    const year = now.getUTCFullYear();
-    const hour = now.getUTCHours(); 
+function generateCouponForTime(identifier, dateObj) {
+    const day = String(dateObj.getUTCDate()).padStart(2, '0');
+    const month = String(dateObj.getUTCMonth() + 1).padStart(2, '0');
+    const year = dateObj.getUTCFullYear();
+    const hour = dateObj.getUTCHours(); 
     
     const dataString = `${identifier.trim().toLowerCase()}|${day}/${month}/${year}|${hour}`;
     
-    const hash = crypto.createHmac('sha256', COUPON_SECRET)
-                       .update(dataString)
-                       .digest('hex')
-                       .substring(0, 8) 
-                       .toUpperCase();
-                       
-    return `WHIS-${hash}`;
+    return crypto.createHmac('sha256', COUPON_SECRET)
+                 .update(dataString)
+                 .digest('hex')
+                 .substring(0, 8) 
+                 .toUpperCase();
 }
 
+// Helper: Generates code based on strictly Identifier (Phone/Email) + Current Date + Hour
+function generateCoupon(identifier) {
+    if (!identifier) return null;
+    return `WHIS-${generateCouponForTime(identifier, new Date())}`;
+}
+
+// Validates against CURRENT Hour OR PREVIOUS Hour (Buffer)
 function validateCoupon(code, identifier) {
     if (!code || !identifier) return false;
-    const validCode = generateCoupon(identifier);
-    return code === validCode;
+    
+    const now = new Date();
+    const currentCode = `WHIS-${generateCouponForTime(identifier, now)}`;
+    
+    // Check previous hour
+    const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
+    const previousCode = `WHIS-${generateCouponForTime(identifier, oneHourAgo)}`;
+    
+    return (code === currentCode || code === previousCode);
 }
 
 // ================= ROUTES =================
