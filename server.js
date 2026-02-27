@@ -1050,7 +1050,7 @@ app.post("/api/payment/create-paypal-order", async (req, res) => {
         tier === 'pro_plus') {
         
         isUpgrade = true;
-        let oldBasePrice = (user.subscription.cycle === 'monthly') ? PRICING.pro.monthly : (PRICING.pro.annual_per_month * 12);
+        let oldBasePrice = (user.subscription.cycle === 'monthly') ? PRICING.pro.monthly : PRICING.pro.quarterly;
         const oldDiscountAmount = (oldBasePrice * PRICING.pro.discount) / 100;
         oldPlanCredit = oldBasePrice - oldDiscountAmount;
         finalAmountUSD = finalAmountUSD - oldPlanCredit;
