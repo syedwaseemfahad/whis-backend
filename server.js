@@ -1005,7 +1005,7 @@ app.post("/api/payment/verify", async (req, res) => {
       user.subscription.cycle = order?.cycle || "monthly";
       user.subscription.isTrial = false; // Reset trial flag if paying
       
-      const days = order?.cycle === "annual" ? 365 : 30;
+      const days = order?.cycle === "quarterly" ? 90 : 30;
       user.subscription.validUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
 
       if (order) { order.status = "paid"; order.paymentId = razorpay_payment_id; order.signature = razorpay_signature; }
