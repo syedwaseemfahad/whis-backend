@@ -1030,10 +1030,10 @@ app.post("/api/payment/create-paypal-order", async (req, res) => {
 
     if (tier === "pro") {
         priceInfo = PRICING.pro;
-        basePrice = (cycle === "annual") ? (priceInfo.annual_per_month * 12) : priceInfo.monthly;
+        basePrice = (cycle === "quarterly") ? priceInfo.quarterly : priceInfo.monthly;
     } else if (tier === "pro_plus") {
         priceInfo = PRICING.pro_plus;
-        basePrice = (cycle === "annual") ? (priceInfo.annual_per_month * 12) : priceInfo.monthly;
+        basePrice = (cycle === "quarterly") ? priceInfo.quarterly : priceInfo.monthly;
     } else {
         return res.status(400).json({ error: "Invalid tier" });
     }
