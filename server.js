@@ -932,7 +932,7 @@ app.post("/api/payment/create-order", async (req, res) => {
         if (user.subscription.cycle === 'monthly') {
             oldBasePrice = PRICING.pro.monthly;
         } else {
-            oldBasePrice = PRICING.pro.annual_per_month * 12;
+            oldBasePrice = PRICING.pro.quarterly;
         }
 
         const oldDiscountAmount = (oldBasePrice * PRICING.pro.discount) / 100;
