@@ -57,14 +57,14 @@ const PAID_MIC_LIMIT_SECONDS = PAID_MIC_LIMIT_MINUTES * 60;
 // --- PRICING CONFIGURATION (VALUES IN USD) ---
 const PRICING = {
   pro: {
-    monthly: parseFloat(process.env.PRO_PER_MONTH), 
-    quarterly: parseFloat(process.env.PRO_QUARTER_PRICE), // Direct total price for 3 months
-    discount: parseFloat(process.env.PRO_DISCOUNT || 0)
+    monthly: parseFloat(process.env.PRO_PER_MONTH) || 10.00, 
+    quarterly: parseFloat(process.env.PRO_QUARTER_PRICE) || 25.00, 
+    discount: parseFloat(process.env.PRO_DISCOUNT) || 0
   },
   pro_plus: {
-    monthly: parseFloat(process.env.PROPLUS_PER_MONTH), 
-    quarterly: parseFloat(process.env.PROPLUS_QUARTER_PRICE), // Direct total price for 3 months
-    discount: parseFloat(process.env.PROPLUS_DISCOUNT || 0)
+    monthly: parseFloat(process.env.PROPLUS_PER_MONTH) || 20.00, 
+    quarterly: parseFloat(process.env.PROPLUS_QUARTER_PRICE) || 45.00, 
+    discount: parseFloat(process.env.PROPLUS_DISCOUNT) || 0
   }
 };
 
@@ -78,7 +78,7 @@ if (!PAYPAL_CLIENT_ID) console.error("⚠️  MISSING: PAYPAL_CLIENT_ID");
 if (!GOOGLE_CLIENT_ID) console.error("⚠️  MISSING: GOOGLE_CLIENT_ID");
 if (!GOOGLE_CLIENT_SECRET) console.error("⚠️  MISSING: GOOGLE_CLIENT_SECRET");
 
-if (isNaN(PRICING.pro.monthly) || isNaN(PRICING.pro_plus.monthly)) {
+if (isNaN(PRICING.pro.monthly) || isNaN(PRICING.pro_plus.monthly) || isNaN(PRICING.pro.quarterly) || isNaN(PRICING.pro_plus.quarterly)) {
     console.error("❌ CRITICAL: Pricing Environment Variables are missing or invalid!");
 }
 
