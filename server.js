@@ -58,12 +58,12 @@ const PAID_MIC_LIMIT_SECONDS = PAID_MIC_LIMIT_MINUTES * 60;
 const PRICING = {
   pro: {
     monthly: parseFloat(process.env.PRO_PER_MONTH), 
-    annual_per_month: parseFloat(process.env.PRO_YEAR_PER_MONTH),
+    quarterly: parseFloat(process.env.PRO_QUARTER_PRICE), // Direct total price for 3 months
     discount: parseFloat(process.env.PRO_DISCOUNT || 0)
   },
   pro_plus: {
     monthly: parseFloat(process.env.PROPLUS_PER_MONTH), 
-    annual_per_month: parseFloat(process.env.PROPLUS_YEAR_PER_MONTH),
+    quarterly: parseFloat(process.env.PROPLUS_QUARTER_PRICE), // Direct total price for 3 months
     discount: parseFloat(process.env.PROPLUS_DISCOUNT || 0)
   }
 };
