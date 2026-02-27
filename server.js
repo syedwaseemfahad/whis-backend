@@ -1138,7 +1138,7 @@ app.post("/api/payment/verify-paypal", async (req, res) => {
           user.subscription.cycle = dbOrder.cycle;
           user.subscription.isTrial = false; // Reset trial
           
-          const days = dbOrder.cycle === "annual" ? 365 : 30;
+          const days = dbOrder.cycle === "quarterly" ? 90 : 30;
           user.subscription.validUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
           
           await user.save();
