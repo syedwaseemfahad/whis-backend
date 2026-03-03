@@ -14,7 +14,6 @@ const url = require("url");
 const PORT = process.env.PORT || 4000;
 const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/whis-app";
 
-const ADMIN_CHAT_PASSWORD = process.env.ADMIN_CHAT_PASSWORD;
 // 1. OpenAI Config
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
@@ -39,6 +38,9 @@ const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET;
 const PAYPAL_BASE_URL = process.env.PAYPAL_MODE === 'sandbox' ? "https://api-m.sandbox.paypal.com" : "https://api-m.paypal.com";
 const INR_TO_USD_RATE = 0.012; 
 const USD_TO_INR = parseFloat(process.env.USD_TO_INR || "90");
+
+// 5. Admin Config for Live Chat
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin123";
 
 // --- LIMITS & TRIAL CONFIGURATION ---
 const FREE_DAILY_LIMIT = parseInt(process.env.FREE_DAILY_LIMIT || "10", 10);
@@ -118,29 +120,6 @@ mongoose
   .catch((err) => console.error("❌ [DB] Connection Failed:", err));
 
 // --- 2. SCHEMAS ---
-
-const supportConversationSchema = new mongoose.Schema({
-  userEmail: { type: String, required: true, index: true },
-  userName: String,
-  messages: [
-    {
-      sender: { type: String, enum: ["user", "admin"], required: true },
-      message: String,
-      timestamp: { type: Date, default: Date.now }
-    }
-  ],
-  unreadByAdmin: { type: Boolean, default: false },
-  updatedAt: { type: Date, default: Date.now }
-});
-
-supportConversationSchema.pre("save", function(next) {
-  this.updatedAt = new Date();
-  next();
-});
-
-const SupportConversation = mongoose.model("SupportConversation", supportConversationSchema);
-
-
 const metricSchema = new mongoose.Schema({
   date: { type: String, required: true },
   ip: { type: String, required: true },
@@ -224,7 +203,6 @@ const freeRequestSchema = new mongoose.Schema({
 });
 const FreeRequest = mongoose.model("free_request", freeRequestSchema);
 
-// --- NEW FEATURE: ENTERPRISE REQUEST SCHEMA ---
 const enterpriseQuerySchema = new mongoose.Schema({
   email: { type: String, required: true },
   mobile: { type: String, required: true },
@@ -232,6 +210,16 @@ const enterpriseQuerySchema = new mongoose.Schema({
   timestamp: { type: Date, default: Date.now }
 });
 const EnterpriseQuery = mongoose.model("EnterpriseQuery", enterpriseQuerySchema);
+
+// --- NEW FEATURE: LIVE CHAT SUPPORT SCHEMA ---
+const chatMessageSchema = new mongoose.Schema({
+  email: { type: String, required: true },
+  isSupport: { type: Boolean, default: false }, 
+  text: { type: String, required: true },
+  timestamp: { type: Date, default: Date.now },
+  read: { type: Boolean, default: false }
+});
+const ChatMessage = mongoose.model("ChatMessage", chatMessageSchema);
 
 
 // --------- 3. SMART TRAFFIC TRACKING MIDDLEWARE ---------
@@ -823,7 +811,7 @@ app.delete("/api/user/context/:id", async (req, res) => {
   }
 });
 
-// --- NEW: COUPON VALIDATION API ---
+// --- COUPON VALIDATION API ---
 app.post("/api/payment/validate-coupon", (req, res) => {
     const { coupon } = req.body;
     const discount = getCouponDiscount(coupon);
@@ -834,7 +822,7 @@ app.post("/api/payment/validate-coupon", (req, res) => {
     }
 });
 
-// --- NEW: ENTERPRISE FORM API ---
+// --- ENTERPRISE FORM API ---
 app.post("/api/enterprise-query", async (req, res) => {
     try {
         const { email, mobile, query } = req.body;
@@ -848,6 +836,92 @@ app.post("/api/enterprise-query", async (req, res) => {
         res.status(500).json({ error: "Failed to save inquiry" });
     }
 });
+
+// ================= LIVE CHAT SUPPORT ROUTES =================
+
+app.get("/api/chat/history/:email", async (req, res) => {
+    try {
+        const email = req.params.email;
+        const messages = await ChatMessage.find({ email }).sort({ timestamp: 1 });
+        res.json({ success: true, messages });
+    } catch (err) {
+        res.status(500).json({ error: "Failed to fetch chat history" });
+    }
+});
+
+app.post("/api/chat/send", async (req, res) => {
+    try {
+        const { email, text } = req.body;
+        if (!email || !text) return res.status(400).json({ error: "Missing fields" });
+        
+        const msg = new ChatMessage({ email, text, isSupport: false });
+        await msg.save();
+        res.json({ success: true, message: msg });
+    } catch (err) {
+        res.status(500).json({ error: "Failed to send message" });
+    }
+});
+
+// Admin chat endpoints
+app.post("/api/admin/login", (req, res) => {
+    const { password } = req.body;
+    if (password === ADMIN_PASSWORD) res.json({ success: true });
+    else res.status(401).json({ success: false, error: "Invalid password" });
+});
+
+app.get("/api/admin/chats", async (req, res) => {
+    try {
+        const chats = await ChatMessage.aggregate([
+            { $sort: { timestamp: -1 } },
+            { $group: {
+                _id: "$email",
+                latestMessage: { $first: "$text" },
+                timestamp: { $first: "$timestamp" },
+                unreadCount: { 
+                    $sum: { 
+                        $cond: [{ $and: [{ $eq: ["$read", false] }, { $eq: ["$isSupport", false] }] }, 1, 0] 
+                    } 
+                }
+            }},
+            { $sort: { timestamp: -1 } }
+        ]);
+        res.json({ success: true, chats });
+    } catch (err) {
+        res.status(500).json({ error: "Failed to fetch chats" });
+    }
+});
+
+app.post("/api/admin/send", async (req, res) => {
+    try {
+        const { email, text, password } = req.body;
+        if (password !== ADMIN_PASSWORD) return res.status(401).json({ error: "Unauthorized" });
+        if (!email || !text) return res.status(400).json({ error: "Missing fields" });
+
+        const msg = new ChatMessage({ email, text, isSupport: true });
+        await msg.save();
+        res.json({ success: true, message: msg });
+    } catch (err) {
+        res.status(500).json({ error: "Failed to send message" });
+    }
+});
+
+app.post("/api/admin/mark-read", async (req, res) => {
+    try {
+        const { email, password } = req.body;
+        if (password !== ADMIN_PASSWORD) return res.status(401).json({ error: "Unauthorized" });
+        
+        await ChatMessage.updateMany(
+            { email, isSupport: false, read: false }, 
+            { $set: { read: true } }
+        );
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: "Failed to mark as read" });
+    }
+});
+
+
+// ================= PAYMENT ROUTES =================
 
 app.post("/api/payment/create-order", async (req, res) => {
   try {
@@ -1268,130 +1342,6 @@ app.post("/api/request-access", async (req, res) => {
     res.status(500).json({ error: "Submission failed. Try again." });
   }
 });
-
-
-// =====================================
-// LIVE CHAT - USER SEND MESSAGE
-// =====================================
-app.post("/api/support/send", async (req, res) => {
-  try {
-    const { email, name, message } = req.body;
-    if (!email || !message) {
-      return res.status(400).json({ error: "Missing fields" });
-    }
-
-    let convo = await SupportConversation.findOne({ userEmail: email });
-
-    if (!convo) {
-      convo = new SupportConversation({
-        userEmail: email,
-        userName: name,
-        messages: []
-      });
-    }
-
-    convo.messages.push({
-      sender: "user",
-      message
-    });
-
-    convo.unreadByAdmin = true;
-    await convo.save();
-
-    res.json({ success: true });
-  } catch (err) {
-    console.error("Chat Send Error:", err);
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-
-// =====================================
-// USER FETCH MESSAGES
-// =====================================
-app.get("/api/support/messages", async (req, res) => {
-  try {
-    const email = req.query.email;
-    if (!email) return res.status(400).json({ error: "Email required" });
-
-    const convo = await SupportConversation.findOne({ userEmail: email });
-    if (!convo) return res.json({ messages: [] });
-
-    res.json({ messages: convo.messages });
-  } catch (err) {
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-
-// =====================================
-// ADMIN LOGIN
-// =====================================
-app.post("/api/support/admin/login", (req, res) => {
-  const { password } = req.body;
-
-  if (password === ADMIN_CHAT_PASSWORD) {
-    return res.json({ success: true });
-  }
-
-  return res.status(401).json({ error: "Invalid password" });
-});
-
-
-// =====================================
-// ADMIN GET ALL CONVERSATIONS
-// =====================================
-app.get("/api/support/admin/conversations", async (req, res) => {
-  try {
-    const password = req.headers["x-admin-password"];
-    if (password !== ADMIN_CHAT_PASSWORD) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-
-    const convos = await SupportConversation.find().sort({ updatedAt: -1 });
-    res.json(convos);
-  } catch (err) {
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-
-// =====================================
-// ADMIN SEND MESSAGE
-// =====================================
-app.post("/api/support/admin/reply", async (req, res) => {
-  try {
-    const password = req.headers["x-admin-password"];
-    if (password !== ADMIN_CHAT_PASSWORD) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-
-    const { email, message } = req.body;
-    const convo = await SupportConversation.findOne({ userEmail: email });
-
-    if (!convo) return res.status(404).json({ error: "Conversation not found" });
-
-    convo.messages.push({
-      sender: "admin",
-      message
-    });
-
-    convo.unreadByAdmin = false;
-    await convo.save();
-
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-//to be removed
-app.get("/api/support/admin/debug-password", (req, res) => {
-  res.json({
-    loadedPassword: ADMIN_CHAT_PASSWORD || "NOT_LOADED"
-  });
-});
-
 
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api')) return next();
