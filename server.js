@@ -117,6 +117,29 @@ mongoose
   .catch((err) => console.error("❌ [DB] Connection Failed:", err));
 
 // --- 2. SCHEMAS ---
+
+const supportConversationSchema = new mongoose.Schema({
+  userEmail: { type: String, required: true, index: true },
+  userName: String,
+  messages: [
+    {
+      sender: { type: String, enum: ["user", "admin"], required: true },
+      message: String,
+      timestamp: { type: Date, default: Date.now }
+    }
+  ],
+  unreadByAdmin: { type: Boolean, default: false },
+  updatedAt: { type: Date, default: Date.now }
+});
+
+supportConversationSchema.pre("save", function(next) {
+  this.updatedAt = new Date();
+  next();
+});
+
+const SupportConversation = mongoose.model("SupportConversation", supportConversationSchema);
+
+
 const metricSchema = new mongoose.Schema({
   date: { type: String, required: true },
   ip: { type: String, required: true },
