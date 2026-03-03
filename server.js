@@ -864,7 +864,7 @@ app.post("/api/chat/send", async (req, res) => {
 
         // --- NEW TELEGRAM NOTIFICATION LOGIC ---
         if (TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID) {
-            const adminDashboardLink = `${BACKEND_URL}/admin`; 
+            const adminDashboardLink = `https://whis-ai.com/admin`; 
             const telegramMsg = `🚨 *New Support Chat*\n*User:* ${email}\n*Message:* ${text}\n\n[Open Admin Panel](${adminDashboardLink})`;
             
             fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
