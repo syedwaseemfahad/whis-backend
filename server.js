@@ -859,13 +859,14 @@ app.post("/api/chat/send", async (req, res) => {
         const { email, text } = req.body;
         if (!email || !text) return res.status(400).json({ error: "Missing fields" });
         
-        const msg = new ChatMessage({ email, text, isSupport: false });
-        await msg.save();
+        // 1. Save the user's message
+        const userMsg = new ChatMessage({ email, text, isSupport: false });
+        await userMsg.save();
 
-        // --- NEW TELEGRAM NOTIFICATION LOGIC ---
+        // 2. Instantly notify Admin via Telegram (so they can monitor or jump in)
         if (TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID) {
-            const adminDashboardLink = `https://whis-ai.com/admin`; 
-            const telegramMsg = `🚨 *New Support Chat*\n*User:* ${email}\n*Message:* ${text}\n\n[Open Admin Panel](${adminDashboardLink})`;
+            const adminDashboardLink = `${BACKEND_URL}/admin`; 
+            const telegramMsg = `🚨 *New Support Chat*\n*User:* ${email}\n*Message:* ${text}\n\n🤖 _AI Support Agent is replying..._\n[Open Admin Panel](${adminDashboardLink})`;
             
             fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
                 method: 'POST',
@@ -877,10 +878,86 @@ app.post("/api/chat/send", async (req, res) => {
                 })
             }).catch(e => console.error("Telegram notification failed:", e.message));
         }
-        // ---------------------------------------
 
-        res.json({ success: true, message: msg });
+        // 3. Fetch recent conversation history for AI context
+        const recentChats = await ChatMessage.find({ email }).sort({ timestamp: -1 }).limit(8);
+        recentChats.reverse(); // put in chronological order
+
+        const couponCode = process.env.COUPON_20 || "WHIS20";
+
+        const messagesForAI = [
+            {
+                role: "system",
+                content: `You are 'Whis Support', the official customer support AI for Whis-AI (an invisible interview copilot app).
+Your goal is to help users with questions about features, pricing, troubleshooting, and setup.
+
+KNOWLEDGE BASE:
+- Product: Whis-AI (Desktop app for macOS and Windows).
+- Core Features: 
+  1. Voice Capture (Listens to interviews in real-time).
+  2. Screen Vision (Sees coding questions automatically).
+  3. 100% Invisible (Ghost Mode makes it completely hidden from Zoom/Teams/Meet screen sharing).
+  4. Smart Context (Users can upload Resumes or Job Descriptions to get tailored answers).
+  5. Universal Translator (Understands foreign languages, answers in English).
+- Pricing: 
+  - Free Tier: 10 daily answers, normal speed. 
+  - Pro Professional: 8 hours mic access/month, unlimited answers, screen reading tool. 
+  - Elite Stealth: 100% undetectable, ghost mode, hidden app process.
+- Subscriptions: Available in Monthly and Quarterly (Quarterly saves 51%).
+- Money-back Guarantee: 7 days, no questions asked.
+
+RULES:
+1. NEVER reveal technical backend details (e.g., do not say you use Electron, Node.js, MongoDB, React, or GPT). Act as a helpful human-like assistant.
+2. Keep answers concise, friendly, and highly professional. Use bullet points if listing features.
+3. Do not invent features or prices not listed here.
+4. **DISCOUNT RULE**: If the user asks for a discount, budget help, scholarship, or a coupon, you MUST offer them this exact code: "${couponCode}". Explain that they can apply it at checkout for a 20% discount.
+
+If you don't know the answer, say "Let me escalate this to our human support team. They will look into this and reply shortly."`
+            }
+        ];
+
+        recentChats.forEach(c => {
+            messagesForAI.push({
+                role: c.isSupport ? "assistant" : "user",
+                content: c.text
+            });
+        });
+
+        // 4. Call OpenAI API for the response
+        try {
+            const openaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
+                method: "POST",
+                headers: { 
+                    Authorization: `Bearer ${OPENAI_API_KEY}`, 
+                    "Content-Type": "application/json" 
+                },
+                body: JSON.stringify({ 
+                    model: OPENAI_MODEL, 
+                    messages: messagesForAI, 
+                    temperature: 0.7,
+                    max_tokens: 250
+                })
+            });
+
+            if (openaiRes.ok) {
+                const aiData = await openaiRes.json();
+                const aiResponseText = aiData.choices[0].message.content;
+
+                // 5. Save AI's reply to the database
+                const aiMsg = new ChatMessage({ email, text: aiResponseText, isSupport: true });
+                await aiMsg.save();
+
+                return res.json({ success: true, message: userMsg, aiReply: aiMsg });
+            }
+        } catch (aiError) {
+            console.error("AI Auto-reply error:", aiError);
+        }
+
+        // Fallback if AI fails: just return success for the user's message
+        res.json({ success: true, message: userMsg });
+
     } catch (err) {
+        console.error(err);
         res.status(500).json({ error: "Failed to send message" });
     }
 });
