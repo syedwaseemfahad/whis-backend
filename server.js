@@ -42,6 +42,10 @@ const USD_TO_INR = parseFloat(process.env.USD_TO_INR || "90");
 // 5. Admin Config for Live Chat
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin123";
 
+// 6. Telegram Notifications Config
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+
 // --- LIMITS & TRIAL CONFIGURATION ---
 const FREE_DAILY_LIMIT = parseInt(process.env.FREE_DAILY_LIMIT || "10", 10);
 const FREE_SCREENSHOT_LIMIT = parseInt(process.env.FREE_SCREENSHOT_LIMIT || "3", 10);
@@ -58,12 +62,12 @@ const PAID_MIC_LIMIT_SECONDS = PAID_MIC_LIMIT_MINUTES * 60;
 const PRICING = {
   pro: {
     monthly: parseFloat(process.env.PRO_PER_MONTH), 
-    quarterly: parseFloat(process.env.PRO_QUARTERLY), // Switched to Quarterly
+    quarterly: parseFloat(process.env.PRO_QUARTERLY),
     discount: parseFloat(process.env.PRO_DISCOUNT || 0)
   },
   pro_plus: {
     monthly: parseFloat(process.env.PROPLUS_PER_MONTH), 
-    quarterly: parseFloat(process.env.PROPLUS_QUARTERLY), // Switched to Quarterly
+    quarterly: parseFloat(process.env.PROPLUS_QUARTERLY),
     discount: parseFloat(process.env.PROPLUS_DISCOUNT || 0)
   }
 };
@@ -93,6 +97,7 @@ if (!RAZORPAY_KEY_ID) console.error("⚠️  MISSING: RAZORPAY_KEY_ID");
 if (!PAYPAL_CLIENT_ID) console.error("⚠️  MISSING: PAYPAL_CLIENT_ID");
 if (!GOOGLE_CLIENT_ID) console.error("⚠️  MISSING: GOOGLE_CLIENT_ID");
 if (!GOOGLE_CLIENT_SECRET) console.error("⚠️  MISSING: GOOGLE_CLIENT_SECRET");
+if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) console.log("⚠️  TELEGRAM NOTIFICATIONS: Disabled (Missing credentials)");
 
 if (isNaN(PRICING.pro.monthly) || isNaN(PRICING.pro_plus.monthly)) {
     console.error("❌ CRITICAL: Pricing Environment Variables are missing or invalid!");
@@ -856,6 +861,24 @@ app.post("/api/chat/send", async (req, res) => {
         
         const msg = new ChatMessage({ email, text, isSupport: false });
         await msg.save();
+
+        // --- NEW TELEGRAM NOTIFICATION LOGIC ---
+        if (TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID) {
+            const adminDashboardLink = `${BACKEND_URL}/admin`; 
+            const telegramMsg = `🚨 *New Support Chat*\n*User:* ${email}\n*Message:* ${text}\n\n[Open Admin Panel](${adminDashboardLink})`;
+            
+            fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                    chat_id: TELEGRAM_CHAT_ID, 
+                    text: telegramMsg, 
+                    parse_mode: 'Markdown' 
+                })
+            }).catch(e => console.error("Telegram notification failed:", e.message));
+        }
+        // ---------------------------------------
+
         res.json({ success: true, message: msg });
     } catch (err) {
         res.status(500).json({ error: "Failed to send message" });
