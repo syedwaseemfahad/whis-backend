@@ -865,7 +865,7 @@ app.post("/api/chat/send", async (req, res) => {
 
         // 2. Instantly notify Admin via Telegram (so they can monitor or jump in)
         if (TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID) {
-            const adminDashboardLink = `${BACKEND_URL}/admin`; 
+            const adminDashboardLink = `https://whis-ai.com/admin`; 
             const telegramMsg = `🚨 *New Support Chat*\n*User:* ${email}\n*Message:* ${text}\n\n🤖 _AI Support Agent is replying..._\n[Open Admin Panel](${adminDashboardLink})`;
             
             fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
