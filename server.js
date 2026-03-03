@@ -14,6 +14,7 @@ const url = require("url");
 const PORT = process.env.PORT || 4000;
 const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/whis-app";
 
+const ADMIN_CHAT_PASSWORD = process.env.ADMIN_CHAT_PASSWORD;
 // 1. OpenAI Config
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
