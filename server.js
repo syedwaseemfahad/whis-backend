@@ -1385,6 +1385,14 @@ app.post("/api/support/admin/reply", async (req, res) => {
   }
 });
 
+//to be removed
+app.get("/api/support/admin/debug-password", (req, res) => {
+  res.json({
+    loadedPassword: ADMIN_CHAT_PASSWORD || "NOT_LOADED"
+  });
+});
+
+
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api')) return next();
   if (req.path.includes('.')) return next();
