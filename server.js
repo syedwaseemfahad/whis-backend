@@ -1269,6 +1269,122 @@ app.post("/api/request-access", async (req, res) => {
   }
 });
 
+
+// =====================================
+// LIVE CHAT - USER SEND MESSAGE
+// =====================================
+app.post("/api/support/send", async (req, res) => {
+  try {
+    const { email, name, message } = req.body;
+    if (!email || !message) {
+      return res.status(400).json({ error: "Missing fields" });
+    }
+
+    let convo = await SupportConversation.findOne({ userEmail: email });
+
+    if (!convo) {
+      convo = new SupportConversation({
+        userEmail: email,
+        userName: name,
+        messages: []
+      });
+    }
+
+    convo.messages.push({
+      sender: "user",
+      message
+    });
+
+    convo.unreadByAdmin = true;
+    await convo.save();
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Chat Send Error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+
+// =====================================
+// USER FETCH MESSAGES
+// =====================================
+app.get("/api/support/messages", async (req, res) => {
+  try {
+    const email = req.query.email;
+    if (!email) return res.status(400).json({ error: "Email required" });
+
+    const convo = await SupportConversation.findOne({ userEmail: email });
+    if (!convo) return res.json({ messages: [] });
+
+    res.json({ messages: convo.messages });
+  } catch (err) {
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+
+// =====================================
+// ADMIN LOGIN
+// =====================================
+app.post("/api/support/admin/login", (req, res) => {
+  const { password } = req.body;
+
+  if (password === ADMIN_CHAT_PASSWORD) {
+    return res.json({ success: true });
+  }
+
+  return res.status(401).json({ error: "Invalid password" });
+});
+
+
+// =====================================
+// ADMIN GET ALL CONVERSATIONS
+// =====================================
+app.get("/api/support/admin/conversations", async (req, res) => {
+  try {
+    const password = req.headers["x-admin-password"];
+    if (password !== ADMIN_CHAT_PASSWORD) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const convos = await SupportConversation.find().sort({ updatedAt: -1 });
+    res.json(convos);
+  } catch (err) {
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+
+// =====================================
+// ADMIN SEND MESSAGE
+// =====================================
+app.post("/api/support/admin/reply", async (req, res) => {
+  try {
+    const password = req.headers["x-admin-password"];
+    if (password !== ADMIN_CHAT_PASSWORD) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const { email, message } = req.body;
+    const convo = await SupportConversation.findOne({ userEmail: email });
+
+    if (!convo) return res.status(404).json({ error: "Conversation not found" });
+
+    convo.messages.push({
+      sender: "admin",
+      message
+    });
+
+    convo.unreadByAdmin = false;
+    await convo.save();
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api')) return next();
   if (req.path.includes('.')) return next();
