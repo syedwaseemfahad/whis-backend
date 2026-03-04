@@ -885,7 +885,7 @@ app.post("/api/chat/send", async (req, res) => {
 
         const couponCode = process.env.COUPON_20 || "WHIS20";
 
-        // *** UPDATED HUMANIZED PROMPT ***
+        // *** UPDATED HUMANIZED PROMPT FOR FAST TYPING ***
         const messagesForAI = [
             {
                 role: "system",
@@ -912,11 +912,15 @@ KNOWLEDGE BASE:
 RULES:
 1. NEVER reveal you are an AI, bot, or automated system. You are a real person named Alex.
 2. NEVER reveal technical backend details (e.g., do not say you use Electron, Node.js, MongoDB, React, or GPT).
-3. Keep answers conversational, natural, and friendly. Avoid overly structured, robotic formats unless specifically listing pricing/features. Keep responses relatively short, like a real live chat message.
+3. Keep answers conversational, natural, and friendly. 
 4. Do not invent features or prices not listed here.
 5. **DISCOUNT RULE**: If the user mentions they are struggling with budget, unemployed, asking for a scholarship, discount, or coupon, be empathetic. Say something like: "I completely understand how tough the job market is right now. I'd love to help out. You can use the code ${couponCode} at checkout for a 20% discount!"
 
-If you don't know the answer, say something like: "That's a great question. Let me double-check that with our tech team and get back to you in just a bit."`
+CRITICAL CHAT FORMATTING RULE:
+To simulate a real human typing quickly on a live chat, you MUST break your response into 2 to 4 short, rapid-fire messages. 
+Separate each chat bubble using the exact string "|||". 
+Example:
+Hi there! Happy to help. ||| Give me just a second to pull up that info for you. ||| Okay, you just need to restart your app to see the changes!`
             }
         ];
 
@@ -947,9 +951,41 @@ If you don't know the answer, say something like: "That's a great question. Let 
                 const aiData = await openaiRes.json();
                 const aiResponseText = aiData.choices[0].message.content;
 
-                // 5. Save AI's reply to the database
-                const aiMsg = new ChatMessage({ email, text: aiResponseText, isSupport: true });
+                // Robust chunk splitting
+                let chunks = [];
+                if (aiResponseText.includes('|||')) {
+                    chunks = aiResponseText.split('|||');
+                } else if (aiResponseText.includes('\n\n')) {
+                    chunks = aiResponseText.split('\n\n');
+                } else {
+                    chunks = [aiResponseText];
+                }
+                
+                chunks = chunks.map(s => s.trim()).filter(s => s);
+
+                // Save the first chunk immediately to provide instant feedback
+                const firstMsgText = chunks.shift() || "Hello!";
+                const aiMsg = new ChatMessage({ email, text: firstMsgText, isSupport: true });
                 await aiMsg.save();
+
+                // Process the remaining chunks asynchronously to simulate a fast human typer
+                if (chunks.length > 0) {
+                    let currentDelay = 0;
+                    chunks.forEach((chunkText) => {
+                        // Base delay of 1.5 seconds + 25ms per character to simulate rapid typing
+                        const typingTime = 1500 + (chunkText.length * 25);
+                        currentDelay += typingTime;
+                        
+                        setTimeout(async () => {
+                            try {
+                                const delayedMsg = new ChatMessage({ email, text: chunkText, isSupport: true });
+                                await delayedMsg.save();
+                            } catch(e) { 
+                                console.error("Delayed message save error:", e); 
+                            }
+                        }, currentDelay);
+                    });
+                }
 
                 return res.json({ success: true, message: userMsg, aiReply: aiMsg });
             }
