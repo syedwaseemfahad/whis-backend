@@ -494,6 +494,21 @@ app.post("/api/auth/google", async (req, res) => {
       { new: true, upsert: true }
     );
     
+    // --- ABANDONED CART RECOVERY HOOK ---
+    setTimeout(async () => {
+        try {
+            const freshUser = await User.findOne({ googleId });
+            // Check if user exists, is on the free tier, and hasn't made a purchase yet
+            if (freshUser && freshUser.subscription.tier === 'free' && freshUser.orders.length === 0) {
+                console.log(`🛒 [ABANDONED CART] Triggering recovery for: ${freshUser.email}`);
+                // Implement email service here (e.g., SendGrid, Resend, Nodemailer)
+                // sendEmail(freshUser.email, "Forgot something? Here's 20% off Whis-AI", "Use code WHIS20 at checkout...");
+            }
+        } catch (e) {
+            console.error("Abandoned cart check failed:", e);
+        }
+    }, 3600000); // Trigger after 1 hour (3,600,000 milliseconds)
+    
     res.json({ success: true, user, tokens: { id_token: idToken, access_token: accessToken } });
   } catch (err) {
     console.error("Auth Error:", err);
