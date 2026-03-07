@@ -36,6 +36,7 @@ const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
 const PAYPAL_CLIENT_ID = process.env.PAYPAL_CLIENT_ID;
 const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET;
 const PAYPAL_BASE_URL = process.env.PAYPAL_MODE === 'sandbox' ? "https://api-m.sandbox.paypal.com" : "https://api-m.paypal.com";
+const INR_TO_USD_RATE = 0.012; 
 const USD_TO_INR = parseFloat(process.env.USD_TO_INR || "90");
 
 // 5. Admin Config for Live Chat
@@ -57,8 +58,7 @@ const TRIAL_DURATION_MINUTES = 10;
 const PAID_MIC_LIMIT_MINUTES = parseInt(process.env.PAID_MIC_LIMIT_MINUTES || "300", 10);
 const PAID_MIC_LIMIT_SECONDS = PAID_MIC_LIMIT_MINUTES * 60;
 
-// --- PRICING CONFIGURATION ---
-// Restored to exactly use your environment variables without overriding them.
+// --- PRICING CONFIGURATION (VALUES IN USD) ---
 const PRICING = {
   pro: {
     monthly: parseFloat(process.env.PRO_PER_MONTH), 
@@ -104,8 +104,8 @@ if (isNaN(PRICING.pro.monthly) || isNaN(PRICING.pro_plus.monthly)) {
 }
 
 const razorpay = new Razorpay({
-  key_id: RAZORPAY_KEY_ID || "dummy",
-  key_secret: RAZORPAY_KEY_SECRET || "dummy",
+  key_id: RAZORPAY_KEY_ID,
+  key_secret: RAZORPAY_KEY_SECRET,
 });
 
 const upload = multer({ 
@@ -493,18 +493,6 @@ app.post("/api/auth/google", async (req, res) => {
       },
       { new: true, upsert: true }
     );
-    
-    // --- ABANDONED CART RECOVERY HOOK ---
-    setTimeout(async () => {
-        try {
-            const freshUser = await User.findOne({ googleId });
-            if (freshUser && freshUser.subscription.tier === 'free' && freshUser.orders.length === 0) {
-                console.log(`🛒 [ABANDONED CART] Triggering recovery for: ${freshUser.email}`);
-            }
-        } catch (e) {
-            console.error("Abandoned cart check failed:", e);
-        }
-    }, 3600000); // 1 hour
     
     res.json({ success: true, user, tokens: { id_token: idToken, access_token: accessToken } });
   } catch (err) {
@@ -1108,6 +1096,7 @@ app.post("/api/payment/create-order", async (req, res) => {
         finalAmount = finalAmount - oldPlanCredit;
     }
 
+    // --- APPLY COUPON ---
     const couponDisc = getCouponDiscount(couponCode);
     if (couponDisc > 0) {
         finalAmount = finalAmount - (finalAmount * couponDisc / 100);
