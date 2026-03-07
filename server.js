@@ -36,7 +36,6 @@ const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
 const PAYPAL_CLIENT_ID = process.env.PAYPAL_CLIENT_ID;
 const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET;
 const PAYPAL_BASE_URL = process.env.PAYPAL_MODE === 'sandbox' ? "https://api-m.sandbox.paypal.com" : "https://api-m.paypal.com";
-const INR_TO_USD_RATE = 0.012; 
 const USD_TO_INR = parseFloat(process.env.USD_TO_INR || "90");
 
 // 5. Admin Config for Live Chat
@@ -58,18 +57,18 @@ const TRIAL_DURATION_MINUTES = 10;
 const PAID_MIC_LIMIT_MINUTES = parseInt(process.env.PAID_MIC_LIMIT_MINUTES || "300", 10);
 const PAID_MIC_LIMIT_SECONDS = PAID_MIC_LIMIT_MINUTES * 60;
 
-// --- CRITICAL FIX: BULLETPROOF PRICING FALLBACKS ---
-// If the environment variables are missing, this ensures the frontend still loads pricing.
+// --- PRICING CONFIGURATION ---
+// Restored to exactly use your environment variables without overriding them.
 const PRICING = {
   pro: {
-    monthly: parseFloat(process.env.PRO_PER_MONTH) || 19.00, 
-    quarterly: parseFloat(process.env.PRO_QUARTERLY) || 39.00,
-    discount: parseFloat(process.env.PRO_DISCOUNT) || 0
+    monthly: parseFloat(process.env.PRO_PER_MONTH), 
+    quarterly: parseFloat(process.env.PRO_QUARTERLY),
+    discount: parseFloat(process.env.PRO_DISCOUNT || 0)
   },
   pro_plus: {
-    monthly: parseFloat(process.env.PROPLUS_PER_MONTH) || 39.00, 
-    quarterly: parseFloat(process.env.PROPLUS_QUARTERLY) || 89.00,
-    discount: parseFloat(process.env.PROPLUS_DISCOUNT) || 0
+    monthly: parseFloat(process.env.PROPLUS_PER_MONTH), 
+    quarterly: parseFloat(process.env.PROPLUS_QUARTERLY),
+    discount: parseFloat(process.env.PROPLUS_DISCOUNT || 0)
   }
 };
 
@@ -99,6 +98,10 @@ if (!PAYPAL_CLIENT_ID) console.error("⚠️  MISSING: PAYPAL_CLIENT_ID");
 if (!GOOGLE_CLIENT_ID) console.error("⚠️  MISSING: GOOGLE_CLIENT_ID");
 if (!GOOGLE_CLIENT_SECRET) console.error("⚠️  MISSING: GOOGLE_CLIENT_SECRET");
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) console.log("⚠️  TELEGRAM NOTIFICATIONS: Disabled (Missing credentials)");
+
+if (isNaN(PRICING.pro.monthly) || isNaN(PRICING.pro_plus.monthly)) {
+    console.error("❌ CRITICAL: Pricing Environment Variables are missing or invalid!");
+}
 
 const razorpay = new Razorpay({
   key_id: RAZORPAY_KEY_ID || "dummy",
@@ -1209,6 +1212,7 @@ app.post("/api/payment/create-paypal-order", async (req, res) => {
         finalAmountUSD = finalAmountUSD - oldPlanCredit;
     }
 
+    // --- APPLY COUPON ---
     const couponDisc = getCouponDiscount(couponCode);
     if (couponDisc > 0) {
         finalAmountUSD = finalAmountUSD - (finalAmountUSD * couponDisc / 100);
