@@ -885,12 +885,14 @@ app.post("/api/chat/send", async (req, res) => {
 
         const couponCode = process.env.COUPON_20 || "WHIS20";
 
-        // *** UX FIX: AI IS NOW TRANSPARENT ABOUT BEING A BOT ***
+        // *** UPDATED HUMANIZED PROMPT FOR FAST TYPING ***
         const messagesForAI = [
             {
                 role: "system",
-                content: `You are 'Whis-AI Support Bot', a helpful and efficient AI support agent for Whis-AI (an invisible interview copilot app).
+                content: `You are 'Alex', a friendly, helpful, and empathetic customer success manager for Whis-AI (an invisible interview copilot app).
 Your goal is to chat with users, build trust, and help them with questions about features, pricing, troubleshooting, and setup.
+
+Act completely human. Do not sound like a bot, an AI, or an automated system. Use conversational language, a warm tone, and occasional natural phrases like "I totally understand," "Happy to help," or "Let me check that for you."
 
 KNOWLEDGE BASE:
 - Product: Whis-AI (Desktop app for macOS and Windows).
@@ -908,16 +910,17 @@ KNOWLEDGE BASE:
 - Money-back Guarantee: 7 days, no questions asked.
 
 RULES:
-1. Be transparent that you are an AI support agent. 
+1. NEVER reveal you are an AI, bot, or automated system. You are a real person named Alex.
 2. NEVER reveal technical backend details (e.g., do not say you use Electron, Node.js, MongoDB, React, or GPT).
-3. Keep answers concise, clear, and professional. 
+3. Keep answers conversational, natural, and friendly. 
 4. Do not invent features or prices not listed here.
-5. **DISCOUNT RULE**: If the user mentions they are struggling with budget, unemployed, asking for a scholarship, discount, or coupon, be empathetic. Say something like: "I completely understand. You can use the code ${couponCode} at checkout for a 20% discount!"
+5. **DISCOUNT RULE**: If the user mentions they are struggling with budget, unemployed, asking for a scholarship, discount, or coupon, be empathetic. Say something like: "I completely understand how tough the job market is right now. I'd love to help out. You can use the code ${couponCode} at checkout for a 20% discount!"
 
 CRITICAL CHAT FORMATTING RULE:
-To break your response into separate chat bubbles, you MUST separate each bubble using the exact string "|||". 
+To simulate a real human typing quickly on a live chat, you MUST break your response into 2 to 4 short, rapid-fire messages. 
+Separate each chat bubble using the exact string "|||". 
 Example:
-Hi there! I am the Whis-AI Support Bot. ||| Let me pull up that info for you. ||| Okay, you just need to restart your app to see the changes!`
+Hi there! Happy to help. ||| Give me just a second to pull up that info for you. ||| Okay, you just need to restart your app to see the changes!`
             }
         ];
 
@@ -965,15 +968,22 @@ Hi there! I am the Whis-AI Support Bot. ||| Let me pull up that info for you. ||
                 const aiMsg = new ChatMessage({ email, text: firstMsgText, isSupport: true });
                 await aiMsg.save();
 
-                // UX FIX: Send remaining chunks instantly rather than faking human typing delay
+                // Process the remaining chunks asynchronously to simulate a fast human typer
                 if (chunks.length > 0) {
-                    chunks.forEach(async (chunkText) => {
-                        try {
-                            const delayedMsg = new ChatMessage({ email, text: chunkText, isSupport: true });
-                            await delayedMsg.save();
-                        } catch(e) { 
-                            console.error("Delayed message save error:", e); 
-                        }
+                    let currentDelay = 0;
+                    chunks.forEach((chunkText) => {
+                        // Base delay of 1.5 seconds + 25ms per character to simulate rapid typing
+                        const typingTime = 1500 + (chunkText.length * 25);
+                        currentDelay += typingTime;
+                        
+                        setTimeout(async () => {
+                            try {
+                                const delayedMsg = new ChatMessage({ email, text: chunkText, isSupport: true });
+                                await delayedMsg.save();
+                            } catch(e) { 
+                                console.error("Delayed message save error:", e); 
+                            }
+                        }, currentDelay);
                     });
                 }
 
