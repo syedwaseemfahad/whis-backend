@@ -883,7 +883,7 @@ app.post("/api/chat/send", async (req, res) => {
         const recentChats = await ChatMessage.find({ email }).sort({ timestamp: -1 }).limit(8);
         recentChats.reverse(); // put in chronological order
 
-        const couponCode = process.env.COUPON_20 || "WHIS20";
+        const couponCode = process.env.COUPON_10 || "WHIS10";
 
         // *** UPDATED HUMANIZED PROMPT FOR FAST TYPING ***
         const messagesForAI = [
