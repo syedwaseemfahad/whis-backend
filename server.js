@@ -72,13 +72,20 @@ const PRICING = {
   }
 };
 
-// --- COUPON VALIDATOR ---
-const getCouponDiscount = (code) => {
+// --- SECURE COUPON VALIDATOR ---
+const getCouponDiscount = (code, cycle) => {
     if (!code) return 0;
-    const c = code.toUpperCase();
+    const c = code.trim().toUpperCase();
+    
     if (process.env.COUPON_10 && process.env.COUPON_10.toUpperCase() === c) return 10;
     if (process.env.COUPON_15 && process.env.COUPON_15.toUpperCase() === c) return 15;
-    if (process.env.COUPON_20 && process.env.COUPON_20.toUpperCase() === c) return 20;
+    
+    // The 20% Coupon strictly enforces Quarterly cycle
+    if (process.env.COUPON_20 && process.env.COUPON_20.toUpperCase() === c) {
+        if (cycle === "monthly") return 0; 
+        return 20;
+    }
+    
     return 0;
 };
 
@@ -822,8 +829,17 @@ app.delete("/api/user/context/:id", async (req, res) => {
 
 // --- COUPON VALIDATION API ---
 app.post("/api/payment/validate-coupon", (req, res) => {
-    const { coupon } = req.body;
-    const discount = getCouponDiscount(coupon);
+    const { coupon, cycle } = req.body;
+    const c = (coupon || "").trim().toUpperCase();
+    
+    // Explicit UI check to reject the 20% coupon if cycle is monthly
+    if (process.env.COUPON_20 && process.env.COUPON_20.toUpperCase() === c) {
+        if (cycle === "monthly") {
+            return res.json({ success: false, error: "This special code is ONLY valid for Quarterly plans." });
+        }
+    }
+    
+    const discount = getCouponDiscount(coupon, cycle);
     if (discount > 0) {
         res.json({ success: true, discount });
     } else {
@@ -883,7 +899,6 @@ app.get("/api/chat/history/:email", async (req, res) => {
 
 app.post("/api/chat/send", async (req, res) => {
     try {
-        // NEW: Extract tzOffset from the frontend request
         const { email, text, tzOffset } = req.body;
         if (!email || !text) return res.status(400).json({ error: "Missing fields" });
         
@@ -904,10 +919,8 @@ app.post("/api/chat/send", async (req, res) => {
         const URL_PRICE = WEBSITE_PRICING_URL || "https://whis-ai.com/#pricing";
         
         // --- LOCATION & PRICING MATH LOGIC ---
-        // NEW: Check if the frontend user's timezone is India (IST is -330 mins offset)
-        // If tzOffset isn't provided (e.g. from an old client), fallback to false (USD)
-        const isIndia = tzOffset === -330; 
-        
+        // Dynamically checks client timezone via frontend tzOffset (IST is -330 mins offset)
+        const isIndia = tzOffset === -330;
         const currSym = isIndia ? '₹' : '$';
         const currName = isIndia ? 'INR' : 'USD';
         
@@ -1206,8 +1219,8 @@ app.post("/api/payment/create-order", async (req, res) => {
         finalAmount = finalAmount - oldPlanCredit;
     }
 
-    // --- APPLY COUPON ---
-    const couponDisc = getCouponDiscount(couponCode);
+    // --- APPLY COUPON (Cycle Enforced!) ---
+    const couponDisc = getCouponDiscount(couponCode, cycle);
     if (couponDisc > 0) {
         finalAmount = finalAmount - (finalAmount * couponDisc / 100);
     }
@@ -1311,8 +1324,8 @@ app.post("/api/payment/create-paypal-order", async (req, res) => {
         finalAmountUSD = finalAmountUSD - oldPlanCredit;
     }
 
-    // --- APPLY COUPON ---
-    const couponDisc = getCouponDiscount(couponCode);
+    // --- APPLY COUPON (Cycle Enforced!) ---
+    const couponDisc = getCouponDiscount(couponCode, cycle);
     if (couponDisc > 0) {
         finalAmountUSD = finalAmountUSD - (finalAmountUSD * couponDisc / 100);
     }
