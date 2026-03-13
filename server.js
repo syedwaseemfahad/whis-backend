@@ -883,7 +883,8 @@ app.get("/api/chat/history/:email", async (req, res) => {
 
 app.post("/api/chat/send", async (req, res) => {
     try {
-        const { email, text } = req.body;
+        // NEW: Extract tzOffset from the frontend request
+        const { email, text, tzOffset } = req.body;
         if (!email || !text) return res.status(400).json({ error: "Missing fields" });
         
         // Dynamic Environment Extractions for AI Context
@@ -903,9 +904,10 @@ app.post("/api/chat/send", async (req, res) => {
         const URL_PRICE = WEBSITE_PRICING_URL || "https://whis-ai.com/#pricing";
         
         // --- LOCATION & PRICING MATH LOGIC ---
-        // Dynamically checks server time alignment to guess if user is in India (IST is UTC +5:30)
-        // You requested: "dynamicly get it from the local time of the place where its running and check it with current indian time"
-        const isIndia = new Date().getTimezoneOffset() === -330;
+        // NEW: Check if the frontend user's timezone is India (IST is -330 mins offset)
+        // If tzOffset isn't provided (e.g. from an old client), fallback to false (USD)
+        const isIndia = tzOffset === -330; 
+        
         const currSym = isIndia ? '₹' : '$';
         const currName = isIndia ? 'INR' : 'USD';
         
