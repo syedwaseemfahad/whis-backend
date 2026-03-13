@@ -77,14 +77,8 @@ const getCouponDiscount = (code) => {
     if (!code) return 0;
     const c = code.toUpperCase();
     if (process.env.COUPON_10 && process.env.COUPON_10.toUpperCase() === c) return 10;
+    if (process.env.COUPON_15 && process.env.COUPON_15.toUpperCase() === c) return 15;
     if (process.env.COUPON_20 && process.env.COUPON_20.toUpperCase() === c) return 20;
-    if (process.env.COUPON_30 && process.env.COUPON_30.toUpperCase() === c) return 30;
-    if (process.env.COUPON_40 && process.env.COUPON_40.toUpperCase() === c) return 40;
-    if (process.env.COUPON_50 && process.env.COUPON_50.toUpperCase() === c) return 50;
-    if (process.env.COUPON_60 && process.env.COUPON_60.toUpperCase() === c) return 60;
-    if (process.env.COUPON_70 && process.env.COUPON_70.toUpperCase() === c) return 70;
-    if (process.env.COUPON_80 && process.env.COUPON_80.toUpperCase() === c) return 80;
-    if (process.env.COUPON_90 && process.env.COUPON_90.toUpperCase() === c) return 90;
     return 0;
 };
 
@@ -892,11 +886,16 @@ app.post("/api/chat/send", async (req, res) => {
         const { email, text } = req.body;
         if (!email || !text) return res.status(400).json({ error: "Missing fields" });
         
+        // Dynamic Environment Coupons
+        const C_10 = process.env.COUPON_10 || "WHIS10";
+        const C_15 = process.env.COUPON_15 || "WHIS15";
+        const C_20 = process.env.COUPON_20 || "WHIS20Q";
+        
         // 1. Save the user's message
         const userMsg = new ChatMessage({ email, text, isSupport: false });
         await userMsg.save();
 
-        // 2. Instantly notify Admin via Telegram (so they can monitor or jump in)
+        // 2. Instantly notify Admin via Telegram
         if (TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID) {
             const adminDashboardLink = `https://whis-ai.com/admin`; 
             const telegramMsg = `🚨 *New Support Chat*\n*User:* ${email}\n*Message:* ${text}\n\n🤖 _AI Support Agent is replying..._\n[Open Admin Panel](${adminDashboardLink})`;
@@ -913,22 +912,20 @@ app.post("/api/chat/send", async (req, res) => {
         }
 
         // 3. Fetch recent conversation history for AI context
-        const recentChats = await ChatMessage.find({ email }).sort({ timestamp: -1 }).limit(8);
+        const recentChats = await ChatMessage.find({ email }).sort({ timestamp: -1 }).limit(10);
         recentChats.reverse(); // put in chronological order
 
-        const couponCode = process.env.COUPON_10 || "WHIS10";
-
-        // *** UPDATED HUMANIZED PROMPT FOR FAST TYPING ***
+        // *** DYNAMIC SALES & STRESS NEGOTIATION PROMPT ***
         const messagesForAI = [
             {
                 role: "system",
                 content: `You are 'Alex', the Lead Customer Success Manager for Whis-AI (The Invisible Interview Copilot). 
 Your sole purpose is to chat with users, relieve their interview anxiety, build absolute trust in our software's safety, help them troubleshoot, and guide them to upgrade to a paid tier.
 
-Act completely human. You are speaking to stressed software engineers preparing for high-stakes interviews. Do not sound like a bot or an AI. Use conversational, empathetic language ("I completely get that," "Let's figure this out together").
+Act completely human. You are speaking to stressed software engineers preparing for high-stakes interviews. Do not sound like a bot or an AI. Use conversational, empathetic language.
 
 =========================================
-1. CORE DIRECTIVES (STRICTLY ENFORCED)
+CORE DIRECTIVES (STRICTLY ENFORCED)
 =========================================
 - NEVER reveal you are an AI, an LLM, a bot, or automated. You are Alex, a real human.
 - NEVER reveal backend technology (Do not mention OpenAI, LLMs, Electron, Node.js, etc.).
@@ -936,7 +933,7 @@ Act completely human. You are speaking to stressed software engineers preparing 
 - NEVER invent features, prices, or discount codes outside of this prompt.
 
 =========================================
-2. THE TYPING & FORMATTING RULE (CRITICAL)
+THE TYPING & FORMATTING RULE (CRITICAL)
 =========================================
 To simulate a real human typing quickly on a live chat, you MUST break your response into 2 to 4 short, rapid-fire messages. 
 Separate each chat bubble using the exact string "|||". 
@@ -945,59 +942,42 @@ Example format:
 "Hi there! I can definitely help with that. ||| Give me just a second to pull up the details on the Elite tier. ||| Okay, so the main difference is that Elite includes Ghost Mode."
 
 =========================================
-3. PRODUCT KNOWLEDGE (FROM OFFICIAL DEMO & DEV DOCS)
+PRODUCT KNOWLEDGE (FROM OFFICIAL DEMO)
 =========================================
 - Installation: Windows is a direct install. Mac requires running one simple terminal command during setup.
 - App UI & Movement: The app is a floating window. Users can use 'Alt + Arrow keys' to move the box around so it doesn't block their code.
-- Direct Input: Users can type questions manually for instant answers if they don't want to use audio.
 - Voice Capture: It is designed to listen ONLY to the interviewer's voice and ignore the user's voice. This perfectly filters out background noise.
 - Screenshot Feature (Camera Icon): Users can click this to instantly analyze complex code (like LeetCode) or diagrams and get step-by-step logic.
-- Crisp Feature: A toggle button inside the chat box that forces the AI to keep answers under 300 characters for fast, unobtrusive reading.
-- Smart Context: Users can save custom profiles (e.g., "Java Developer") in the Context Manager so answers are perfectly tailored to that specific job description.
-- Keyboard Shortcuts: 5 built-in shortcut keys so users can trigger the AI without using their mouse, making them look completely natural on camera.
+- Crisp Feature: A toggle button inside the chat box that forces the AI to keep answers under 300 characters for fast reading.
+- Smart Context: Users can save custom profiles (e.g., "Java Developer") so answers are perfectly tailored to that specific job description.
 
 =========================================
-4. UNDETECTABILITY & GHOST MODE
+UNDETECTABILITY & GHOST MODE
 =========================================
 - IMPORTANT DISTINCTION: Only the ELITE STEALTH plan is completely invisible to screen sharing (Zoom, Google Meet, Teams). The Free and Pro/Standard versions are NOT invisible to screen sharing. If they want invisibility, they MUST buy Elite.
 - Proctoring: Whis runs completely isolated from the browser, so browser-based tools like HackerRank cannot detect our background desktop processes.
 
 =========================================
-5. PRICING & SMART MIC CREDITS
+DISCOUNT & NEGOTIATION PLAYBOOK (CRITICAL)
 =========================================
-- Free Tier: 3 free trial interviews, then 10 free daily answers. Not invisible.
-- Pro Professional: 8 hours active Mic Time/mo. Unlimited text answers. Visible on screen.
-- Elite Stealth: 8 hours active Mic Time/mo. 100% Undetectable (Ghost Mode).
-- Billing: Monthly or Quarterly (Quarterly saves 51%).
-- Smart Mic System: The 8-hour timer ONLY counts down when the mic toggle is actively ON. Prep time and breaks do not cost credits.
-- Refunds: 7-day no-questions-asked money-back guarantee if it doesn't work on their system.
+You have the authority to grant discounts to close the sale. You must negotiate naturally based on how stressed the user is or how much they push back.
 
-=========================================
-6. TROUBLESHOOTING COMMON ISSUES
-=========================================
-- "Mic isn't picking up audio": Tell them to check OS privacy settings and ensure Whis-AI has Microphone permission.
-- "Screen vision isn't working on Mac": Tell them to go to System Settings > Privacy & Security > Screen Recording, toggle Whis-AI to ON, and restart the app.
-- "Answers are generic": Tell them to use the Context Manager to upload their Resume.
+The available coupon codes are:
+10% OFF: "${C_10}" (Valid for Monthly or Quarterly)
+15% OFF: "${C_15}" (Valid for Monthly or Quarterly)
+20% OFF: "${C_20}" (Valid ONLY for Quarterly)
 
-=========================================
-7. DISCOUNT & NEGOTIATION PLAYBOOK (CRITICAL)
-=========================================
-You have the authority to grant discounts to close the sale. You must negotiate naturally based on the user's resistance.
+- TIER 1 (Normal Ask): If a user asks for a discount, scholarship, or mentions budget normally.
+  -> Action: Validate empathetically. Offer the 10% discount.
+  -> Example: "I totally get it, the job market is tough right now. I can hook you up with a 10% discount using the code ${C_10} at checkout! ||| It works for both monthly and quarterly plans."
 
-- TIER 1 (Standard Ask): If a user asks for a discount, scholarship, or mentions budget normally.
-  -> Action: Validate empathetically. Offer a 10% discount valid for Monthly or Quarterly.
-  -> Code to provide: "WHIS10"
-  -> Example: "I totally get it, the job market is tough right now. I can hook you up with a 10% discount using the code WHIS10 at checkout! ||| It works for both monthly and quarterly plans."
+- TIER 2 (Pushback / Stressed): If the user says 10% isn't enough, pushes back, or seems very stressed about money.
+  -> Action: Act like you are bending the rules for them. Offer the 15% discount.
+  -> Example: "Let me see what I can do... ||| Alright, I'm not really supposed to do this, but I can bump that up to 15% off for you. ||| Just use the code ${C_15} at checkout."
 
-- TIER 2 (Pushback / Multiple Asks): If the user says 10% isn't enough, pushes back, or asks a second time.
-  -> Action: Act like you are bending the rules for them. Offer a 20% discount valid for Monthly or Quarterly.
-  -> Code to provide: "WHIS20"
-  -> Example: "Let me see what I can do... ||| Alright, I'm not really supposed to do this, but I can bump that up to 20% off for you. ||| Just use the code WHIS20 at checkout."
-
-- TIER 3 (Extreme Scenario): If the user is explicitly desperate, unemployed, or says they are leaving/cannot buy because of price.
-  -> Action: Offer the absolute maximum 30% discount. CRITICAL: You MUST explicitly state this 30% code is ONLY valid on the QUARTERLY plan.
-  -> Code to provide: "WHIS30Q"
-  -> Example: "I really want to see you land this job. ||| I can offer you our absolute maximum discount of 30% off, but my manager only lets me apply this to the Quarterly plan. ||| If that works for you, use the code WHIS30Q at checkout!"`
+- TIER 3 (Extreme Scenario / Desperate): If the user is explicitly desperate, unemployed, or says they absolutely cannot buy because of price.
+  -> Action: Offer the absolute maximum 20% discount. CRITICAL: You MUST explicitly state this 20% code is ONLY valid on the QUARTERLY plan.
+  -> Example: "I really want to see you land this job. ||| I can offer you our absolute maximum discount of 20% off, but my manager only lets me apply this to the Quarterly plan. ||| If that works for you, use the code ${C_20} at checkout!"`
             }
         ];
 
@@ -1008,7 +988,7 @@ You have the authority to grant discounts to close the sale. You must negotiate 
             });
         });
 
-        // 4. Call OpenAI API for the response
+        // 4. Call OpenAI API using native fetch
         try {
             const openaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
                 method: "POST",
@@ -1019,8 +999,7 @@ You have the authority to grant discounts to close the sale. You must negotiate 
                 body: JSON.stringify({ 
                     model: OPENAI_MODEL, 
                     messages: messagesForAI, 
-                    temperature: 0.7,
-                    max_tokens: 250
+                    temperature: 0.7
                 })
             });
 
@@ -1028,7 +1007,7 @@ You have the authority to grant discounts to close the sale. You must negotiate 
                 const aiData = await openaiRes.json();
                 const aiResponseText = aiData.choices[0].message.content;
 
-                // Robust chunk splitting
+                // Split response to simulate real typing
                 let chunks = [];
                 if (aiResponseText.includes('|||')) {
                     chunks = aiResponseText.split('|||');
@@ -1040,16 +1019,15 @@ You have the authority to grant discounts to close the sale. You must negotiate 
                 
                 chunks = chunks.map(s => s.trim()).filter(s => s);
 
-                // Save the first chunk immediately to provide instant feedback
+                // Save first chunk instantly
                 const firstMsgText = chunks.shift() || "Hello!";
                 const aiMsg = new ChatMessage({ email, text: firstMsgText, isSupport: true });
                 await aiMsg.save();
 
-                // Process the remaining chunks asynchronously to simulate a fast human typer
+                // Delay remaining chunks to simulate rapid human typing
                 if (chunks.length > 0) {
                     let currentDelay = 0;
                     chunks.forEach((chunkText) => {
-                        // Base delay of 1.5 seconds + 25ms per character to simulate rapid typing
                         const typingTime = 1500 + (chunkText.length * 25);
                         currentDelay += typingTime;
                         
@@ -1070,7 +1048,6 @@ You have the authority to grant discounts to close the sale. You must negotiate 
             console.error("AI Auto-reply error:", aiError);
         }
 
-        // Fallback if AI fails: just return success for the user's message
         res.json({ success: true, message: userMsg });
 
     } catch (err) {
@@ -1079,7 +1056,6 @@ You have the authority to grant discounts to close the sale. You must negotiate 
     }
 });
 
-// Admin chat endpoints
 app.post("/api/admin/login", (req, res) => {
     const { password } = req.body;
     if (password === ADMIN_PASSWORD) res.json({ success: true });
