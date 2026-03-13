@@ -216,7 +216,7 @@ const enterpriseQuerySchema = new mongoose.Schema({
 });
 const EnterpriseQuery = mongoose.model("EnterpriseQuery", enterpriseQuerySchema);
 
-// --- NEW FEATURE: LIVE CHAT SUPPORT SCHEMA ---
+// --- LIVE CHAT SUPPORT SCHEMA ---
 const chatMessageSchema = new mongoose.Schema({
   email: { type: String, required: true },
   isSupport: { type: Boolean, default: false }, 
@@ -225,6 +225,16 @@ const chatMessageSchema = new mongoose.Schema({
   read: { type: Boolean, default: false }
 });
 const ChatMessage = mongoose.model("ChatMessage", chatMessageSchema);
+
+// --- NEW FEATURE: AI REPORT SCHEMA ---
+const reportSchema = new mongoose.Schema({
+  googleId: { type: String },
+  email: { type: String },
+  reason: { type: String, required: true },
+  details: { type: String },
+  timestamp: { type: Date, default: Date.now }
+});
+const Report = mongoose.model("Report", reportSchema);
 
 
 // --------- 3. SMART TRAFFIC TRACKING MIDDLEWARE ---------
@@ -839,6 +849,29 @@ app.post("/api/enterprise-query", async (req, res) => {
     } catch(e) {
         console.error("Enterprise Query Error:", e);
         res.status(500).json({ error: "Failed to save inquiry" });
+    }
+});
+
+// --- NEW FEATURE: AI REPORT ENDPOINT ---
+app.post("/api/report", async (req, res) => {
+    try {
+        const googleId = req.headers["x-google-id"];
+        const { email, reason, details } = req.body;
+        
+        if (!reason) return res.status(400).json({ error: "Reason is required" });
+
+        const newReport = new Report({ 
+            googleId: googleId || "Anonymous", 
+            email: email || "No Email Provided", 
+            reason, 
+            details 
+        });
+        
+        await newReport.save();
+        res.json({ success: true });
+    } catch (err) {
+        console.error("Report Submission Error:", err);
+        res.status(500).json({ error: "Failed to submit report" });
     }
 });
 
