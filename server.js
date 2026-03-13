@@ -21,7 +21,7 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 // 2. App & Auth Config
 const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:4000";
 const APP_AUTH_TOKEN = process.env.APP_AUTH_TOKEN;
-const WEBSITE_PRICING_URL = process.env.WEBSITE_PRICING_URL;
+const WEBSITE_PRICING_URL = process.env.WEBSITE_PRICING_URL || "https://whis-ai.com/#pricing";
 
 // 3. Google Auth Config
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
@@ -53,7 +53,7 @@ const PAID_SCREENSHOT_LIMIT = parseInt(process.env.PAID_SCREENSHOT_LIMIT || "10"
 const MAX_TEXT_CHAR_LIMIT = parseInt(process.env.MAX_TEXT_CHAR_LIMIT || "4096", 10);
 
 const MAX_TRIAL_SESSIONS = parseInt(process.env.MAX_TRIAL_SESSIONS || "3", 10);
-const TRIAL_DURATION_MINUTES = 10; 
+const TRIAL_DURATION_MINUTES = parseInt(process.env.TRIAL_DURATION_MINUTES || "10", 10);
 
 const PAID_MIC_LIMIT_MINUTES = parseInt(process.env.PAID_MIC_LIMIT_MINUTES || "300", 10);
 const PAID_MIC_LIMIT_SECONDS = PAID_MIC_LIMIT_MINUTES * 60;
@@ -61,13 +61,13 @@ const PAID_MIC_LIMIT_SECONDS = PAID_MIC_LIMIT_MINUTES * 60;
 // --- PRICING CONFIGURATION (VALUES IN USD) ---
 const PRICING = {
   pro: {
-    monthly: parseFloat(process.env.PRO_PER_MONTH), 
-    quarterly: parseFloat(process.env.PRO_QUARTERLY),
+    monthly: parseFloat(process.env.PRO_PER_MONTH || "19.99"), 
+    quarterly: parseFloat(process.env.PRO_QUARTERLY || "49.99"),
     discount: parseFloat(process.env.PRO_DISCOUNT || 0)
   },
   pro_plus: {
-    monthly: parseFloat(process.env.PROPLUS_PER_MONTH), 
-    quarterly: parseFloat(process.env.PROPLUS_QUARTERLY),
+    monthly: parseFloat(process.env.PROPLUS_PER_MONTH || "39.99"), 
+    quarterly: parseFloat(process.env.PROPLUS_QUARTERLY || "89.99"),
     discount: parseFloat(process.env.PROPLUS_DISCOUNT || 0)
   }
 };
@@ -886,11 +886,23 @@ app.post("/api/chat/send", async (req, res) => {
         const { email, text } = req.body;
         if (!email || !text) return res.status(400).json({ error: "Missing fields" });
         
-        // Dynamic Environment Coupons
+        // Dynamic Environment Extractions for AI Context
         const C_10 = process.env.COUPON_10 || "WHIS10";
         const C_15 = process.env.COUPON_15 || "WHIS15";
         const C_20 = process.env.COUPON_20 || "WHIS20Q";
         
+        const P_PRO_M = PRICING.pro.monthly || 19.99;
+        const P_PRO_Q = PRICING.pro.quarterly || 49.99;
+        const P_ELITE_M = PRICING.pro_plus.monthly || 39.99;
+        const P_ELITE_Q = PRICING.pro_plus.quarterly || 89.99;
+        const RATE = USD_TO_INR || 90;
+        const URL_PRICE = WEBSITE_PRICING_URL || "https://whis-ai.com/#pricing";
+        
+        const INR_PRO_M = Math.floor(P_PRO_M * RATE);
+        const INR_PRO_Q = Math.floor(P_PRO_Q * RATE);
+        const INR_ELITE_M = Math.floor(P_ELITE_M * RATE);
+        const INR_ELITE_Q = Math.floor(P_ELITE_Q * RATE);
+
         // 1. Save the user's message
         const userMsg = new ChatMessage({ email, text, isSupport: false });
         await userMsg.save();
@@ -915,7 +927,7 @@ app.post("/api/chat/send", async (req, res) => {
         const recentChats = await ChatMessage.find({ email }).sort({ timestamp: -1 }).limit(10);
         recentChats.reverse(); // put in chronological order
 
-        // *** DYNAMIC SALES & STRESS NEGOTIATION PROMPT ***
+        // *** DYNAMIC SALES, PRICING, & STRESS NEGOTIATION PROMPT ***
         const messagesForAI = [
             {
                 role: "system",
@@ -942,14 +954,28 @@ Example format:
 "Hi there! I can definitely help with that. ||| Give me just a second to pull up the details on the Elite tier. ||| Okay, so the main difference is that Elite includes Ghost Mode."
 
 =========================================
-PRODUCT KNOWLEDGE (FROM OFFICIAL DEMO)
+SYSTEM PARAMETERS & LIMITS
 =========================================
-- Installation: Windows is a direct install. Mac requires running one simple terminal command during setup.
-- App UI & Movement: The app is a floating window. Users can use 'Alt + Arrow keys' to move the box around so it doesn't block their code.
-- Voice Capture: It is designed to listen ONLY to the interviewer's voice and ignore the user's voice. This perfectly filters out background noise.
-- Screenshot Feature (Camera Icon): Users can click this to instantly analyze complex code (like LeetCode) or diagrams and get step-by-step logic.
-- Crisp Feature: A toggle button inside the chat box that forces the AI to keep answers under 300 characters for fast reading.
-- Smart Context: Users can save custom profiles (e.g., "Java Developer") so answers are perfectly tailored to that specific job description.
+- Free Tier Limits: ${FREE_DAILY_LIMIT} text answers/day, ${FREE_SCREENSHOT_LIMIT} screenshots/day.
+- Paid Tier Limits: ${PAID_MIC_LIMIT_MINUTES / 60} hours of active mic time/month, ${PAID_SCREENSHOT_LIMIT} screenshots/day.
+- Trial Duration: ${TRIAL_DURATION_MINUTES} minutes.
+- Pricing Link: ${URL_PRICE}
+
+=========================================
+PRICING & CURRENCY LOGIC (STRICT SECRECY)
+=========================================
+We use geographic pricing based on our backend exchange rates. 
+YOU MUST NEVER REVEAL TO THE USER THAT PRICING CHANGES BASED ON LOCATION OR EXCHANGE RATES.
+If a user asks for pricing, you must determine their country first (if you don't already know it from the chat). 
+If you don't know, casually ask: "I can definitely help with pricing! Real quick, what country are you located in so I can give you the correct local plan options?"
+
+Once you know their location:
+- IF THE USER IS IN INDIA: Quote ONLY in Indian Rupees (₹).
+  * Pro Professional: ₹${INR_PRO_M}/month OR ₹${INR_PRO_Q}/quarterly.
+  * Elite Stealth: ₹${INR_ELITE_M}/month OR ₹${INR_ELITE_Q}/quarterly.
+- IF THE USER IS ANYWHERE ELSE IN THE WORLD: Quote ONLY in US Dollars ($).
+  * Pro Professional: $${P_PRO_M}/month OR $${P_PRO_Q}/quarterly.
+  * Elite Stealth: $${P_ELITE_M}/month OR $${P_ELITE_Q}/quarterly.
 
 =========================================
 UNDETECTABILITY & GHOST MODE
