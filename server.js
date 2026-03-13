@@ -82,7 +82,7 @@ const getCouponDiscount = (code, cycle) => {
     
     // The 20% Coupon strictly enforces Quarterly cycle
     if (process.env.COUPON_20 && process.env.COUPON_20.toUpperCase() === c) {
-        if (cycle === "monthly") return 0; 
+        if (cycle !== "quarterly") return 0; 
         return 20;
     }
     
@@ -832,10 +832,10 @@ app.post("/api/payment/validate-coupon", (req, res) => {
     const { coupon, cycle } = req.body;
     const c = (coupon || "").trim().toUpperCase();
     
-    // Explicit UI check to reject the 20% coupon if cycle is monthly
+    // Explicit UI check to reject the 20% coupon if cycle is not quarterly
     if (process.env.COUPON_20 && process.env.COUPON_20.toUpperCase() === c) {
-        if (cycle === "monthly") {
-            return res.json({ success: false, error: "This special code is ONLY valid for Quarterly plans." });
+        if (cycle !== "quarterly") {
+            return res.json({ success: false, error: "Code ONLY valid for Quarterly plans." });
         }
     }
     
