@@ -893,15 +893,38 @@ app.post("/api/chat/send", async (req, res) => {
         
         const P_PRO_M = PRICING.pro.monthly || 19.99;
         const P_PRO_Q = PRICING.pro.quarterly || 49.99;
+        const D_PRO = PRICING.pro.discount || 0;
+        
         const P_ELITE_M = PRICING.pro_plus.monthly || 39.99;
         const P_ELITE_Q = PRICING.pro_plus.quarterly || 89.99;
+        const D_ELITE = PRICING.pro_plus.discount || 0;
+        
         const RATE = USD_TO_INR || 90;
         const URL_PRICE = WEBSITE_PRICING_URL || "https://whis-ai.com/#pricing";
         
-        const INR_PRO_M = Math.floor(P_PRO_M * RATE);
-        const INR_PRO_Q = Math.floor(P_PRO_Q * RATE);
-        const INR_ELITE_M = Math.floor(P_ELITE_M * RATE);
-        const INR_ELITE_Q = Math.floor(P_ELITE_Q * RATE);
+        // --- LOCATION & PRICING MATH LOGIC ---
+        // Dynamically checks server time alignment to guess if user is in India (IST is UTC +5:30)
+        // You requested: "dynamicly get it from the local time of the place where its running and check it with current indian time"
+        const isIndia = new Date().getTimezoneOffset() === -330;
+        const currSym = isIndia ? '₹' : '$';
+        const currName = isIndia ? 'INR' : 'USD';
+        
+        const formatCurr = (usdVal) => {
+            if (isIndia) return Math.floor(usdVal * RATE);
+            return usdVal.toFixed(2);
+        };
+
+        const proM_base = formatCurr(P_PRO_M);
+        const proM_disc = formatCurr(P_PRO_M * (1 - D_PRO/100));
+        
+        const proQ_base = formatCurr(P_PRO_Q);
+        const proQ_disc = formatCurr(P_PRO_Q * (1 - D_PRO/100));
+        
+        const eliteM_base = formatCurr(P_ELITE_M);
+        const eliteM_disc = formatCurr(P_ELITE_M * (1 - D_ELITE/100));
+        
+        const eliteQ_base = formatCurr(P_ELITE_Q);
+        const eliteQ_disc = formatCurr(P_ELITE_Q * (1 - D_ELITE/100));
 
         // 1. Save the user's message
         const userMsg = new ChatMessage({ email, text, isSupport: false });
@@ -937,6 +960,12 @@ Your sole purpose is to chat with users, relieve their interview anxiety, build 
 Act completely human. You are speaking to stressed software engineers preparing for high-stakes interviews. Do not sound like a bot or an AI. Use conversational, empathetic language.
 
 =========================================
+PRODUCT DEFINITION (CRITICAL)
+=========================================
+Whis-AI is an INVISIBLE desktop app that gives users real-time answers during ACTUAL live interviews and exams. 
+It is NOT for mock interviews, practice, or "other random stuff". It operates completely hidden from screen-sharing and proctoring to help users pass their real assessments securely.
+
+=========================================
 CORE DIRECTIVES (STRICTLY ENFORCED)
 =========================================
 - NEVER reveal you are an AI, an LLM, a bot, or automated. You are Alex, a real human.
@@ -954,28 +983,28 @@ Example format:
 "Hi there! I can definitely help with that. ||| Give me just a second to pull up the details on the Elite tier. ||| Okay, so the main difference is that Elite includes Ghost Mode."
 
 =========================================
-SYSTEM PARAMETERS & LIMITS
+PRICING, CURRENCY & DISCOUNT MATH (STRICT)
 =========================================
-- Free Tier Limits: ${FREE_DAILY_LIMIT} text answers/day, ${FREE_SCREENSHOT_LIMIT} screenshots/day.
-- Paid Tier Limits: ${PAID_MIC_LIMIT_MINUTES / 60} hours of active mic time/month, ${PAID_SCREENSHOT_LIMIT} screenshots/day.
-- Trial Duration: ${TRIAL_DURATION_MINUTES} minutes.
-- Pricing Link: ${URL_PRICE}
+The system has dynamically detected the user's location based on local server time. 
+Auto-Detected Currency to Use: ${currSym} (${currName})
+(Note: If the user states they are from India or uses ₹/INR, immediately switch to INR pricing. Otherwise, use the auto-detected currency above.)
+NEVER ask the user for their location.
 
-=========================================
-PRICING & CURRENCY LOGIC (STRICT SECRECY)
-=========================================
-We use geographic pricing based on our backend exchange rates. 
-YOU MUST NEVER REVEAL TO THE USER THAT PRICING CHANGES BASED ON LOCATION OR EXCHANGE RATES.
-If a user asks for pricing, you must determine their country first (if you don't already know it from the chat). 
-If you don't know, casually ask: "I can definitely help with pricing! Real quick, what country are you located in so I can give you the correct local plan options?"
+Here is the exact pricing data you must use:
 
-Once you know their location:
-- IF THE USER IS IN INDIA: Quote ONLY in Indian Rupees (₹).
-  * Pro Professional: ₹${INR_PRO_M}/month OR ₹${INR_PRO_Q}/quarterly.
-  * Elite Stealth: ₹${INR_ELITE_M}/month OR ₹${INR_ELITE_Q}/quarterly.
-- IF THE USER IS ANYWHERE ELSE IN THE WORLD: Quote ONLY in US Dollars ($).
-  * Pro Professional: $${P_PRO_M}/month OR $${P_PRO_Q}/quarterly.
-  * Elite Stealth: $${P_ELITE_M}/month OR $${P_ELITE_Q}/quarterly.
+PRO PROFESSIONAL TIER:
+- Original Monthly: ${currSym}${proM_base} (Site Discount: ${D_PRO}%) -> Current Site Price: ${currSym}${proM_disc}
+- Original Quarterly: ${currSym}${proQ_base} (Site Discount: ${D_PRO}%) -> Current Site Price: ${currSym}${proQ_disc}
+
+ELITE STEALTH TIER:
+- Original Monthly: ${currSym}${eliteM_base} (Site Discount: ${D_ELITE}%) -> Current Site Price: ${currSym}${eliteM_disc}
+- Original Quarterly: ${currSym}${eliteQ_base} (Site Discount: ${D_ELITE}%) -> Current Site Price: ${currSym}${eliteQ_disc}
+
+When quoting a price, you MUST explain the math breakdown clearly so they feel they are getting a great deal.
+Formula: Original Price -> Minus Site Discount -> Minus your Extra Coupon (10/15/20%) -> Final Price.
+
+Example phrasing to use:
+"The original price for Elite Quarterly is ${currSym}${eliteQ_base}. We currently have a site-wide discount of ${D_ELITE}%, which brings it down to ${currSym}${eliteQ_disc}. If you use my special code ${C_10} for an extra 10% off, your final price will be just ${currSym}${isIndia ? Math.floor(eliteQ_disc * 0.9) : (eliteQ_disc * 0.9).toFixed(2)}!"
 
 =========================================
 UNDETECTABILITY & GHOST MODE
@@ -994,7 +1023,7 @@ The available coupon codes are:
 20% OFF: "${C_20}" (Valid ONLY for Quarterly)
 
 - TIER 1 (Normal Ask): If a user asks for a discount, scholarship, or mentions budget normally.
-  -> Action: Validate empathetically. Offer the 10% discount.
+  -> Action: Validate empathetically. Offer the 10% discount. Explain the math using the formula above.
   -> Example: "I totally get it, the job market is tough right now. I can hook you up with a 10% discount using the code ${C_10} at checkout! ||| It works for both monthly and quarterly plans."
 
 - TIER 2 (Pushback / Stressed): If the user says 10% isn't enough, pushes back, or seems very stressed about money.
