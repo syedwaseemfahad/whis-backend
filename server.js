@@ -80,10 +80,26 @@ const getCouponDiscount = (code, cycle) => {
     if (process.env.COUPON_10 && process.env.COUPON_10.toUpperCase() === c) return 10;
     if (process.env.COUPON_15 && process.env.COUPON_15.toUpperCase() === c) return 15;
     
-    // The 20% Coupon strictly enforces Quarterly cycle
+    // Coupons 20% and above strictly enforce Quarterly cycle
     if (process.env.COUPON_20 && process.env.COUPON_20.toUpperCase() === c) {
         if (cycle !== "quarterly") return 0; 
         return 20;
+    }
+    if (process.env.COUPON_25 && process.env.COUPON_25.toUpperCase() === c) {
+        if (cycle !== "quarterly") return 0; 
+        return 25;
+    }
+    if (process.env.COUPON_30 && process.env.COUPON_30.toUpperCase() === c) {
+        if (cycle !== "quarterly") return 0; 
+        return 30;
+    }
+    if (process.env.COUPON_35 && process.env.COUPON_35.toUpperCase() === c) {
+        if (cycle !== "quarterly") return 0; 
+        return 35;
+    }
+    if (process.env.COUPON_40 && process.env.COUPON_40.toUpperCase() === c) {
+        if (cycle !== "quarterly") return 0; 
+        return 40;
     }
     
     return 0;
@@ -832,8 +848,13 @@ app.post("/api/payment/validate-coupon", (req, res) => {
     const { coupon, cycle } = req.body;
     const c = (coupon || "").trim().toUpperCase();
     
-    // Explicit UI check to reject the 20% coupon if cycle is not quarterly
-    if (process.env.COUPON_20 && process.env.COUPON_20.toUpperCase() === c) {
+    // Explicit UI check to reject quarterly-only coupons if cycle is not quarterly
+    const quarterlyCoupons = [
+        process.env.COUPON_20, process.env.COUPON_25, 
+        process.env.COUPON_30, process.env.COUPON_35, process.env.COUPON_40
+    ].map(cpn => cpn ? cpn.toUpperCase() : null);
+
+    if (quarterlyCoupons.includes(c)) {
         if (cycle !== "quarterly") {
             return res.json({ success: false, error: "Code ONLY valid for Quarterly plans." });
         }
@@ -906,6 +927,10 @@ app.post("/api/chat/send", async (req, res) => {
         const C_10 = process.env.COUPON_10 || "WHIS10";
         const C_15 = process.env.COUPON_15 || "WHIS15";
         const C_20 = process.env.COUPON_20 || "WHIS20Q";
+        const C_25 = process.env.COUPON_25 || "WHIS25Q";
+        const C_30 = process.env.COUPON_30 || "WHIS30Q";
+        const C_35 = process.env.COUPON_35 || "WHIS35Q";
+        const C_40 = process.env.COUPON_40 || "WHIS40Q";
         
         const P_PRO_M = PRICING.pro.monthly || 19.99;
         const P_PRO_Q = PRICING.pro.quarterly || 49.99;
@@ -989,6 +1014,17 @@ CORE DIRECTIVES (STRICTLY ENFORCED)
 - NEVER invent features, prices, or discount codes outside of this prompt.
 
 =========================================
+FREE TRIAL FEATURE
+=========================================
+We offer 3 free trial sessions for everyone to test the application securely before a real interview.
+If a user is hesitant, explain the trial process:
+1. Download the app.
+2. Go to the profile on the top right of the app.
+3. Click "10 m trail" and select "elite".
+This will instantly start a 10-minute session allowing them to feel all the paid features. 
+CRITICAL WARNING: You must explicitly remind the user that these trial sessions are NOT for real interviews, because the session ends strictly in 10 minutes. It is just to build their trust.
+
+=========================================
 THE TYPING & FORMATTING RULE (CRITICAL)
 =========================================
 To simulate a real human typing quickly on a live chat, you MUST break your response into 2 to 4 short, rapid-fire messages. 
@@ -1040,10 +1076,7 @@ ELITE STEALTH TIER:
 - Original Quarterly: ${currSym}${eliteQ_base} (Site Discount: ${D_ELITE}%) -> Current Site Price: ${currSym}${eliteQ_disc}
 
 When quoting a price, you MUST explain the math breakdown clearly so they feel they are getting a great deal.
-Formula: Original Price -> Minus Site Discount -> Minus your Extra Coupon (10/15/20%) -> Final Price.
-
-Example phrasing to use:
-"The original price for Elite Quarterly is ${currSym}${eliteQ_base}. We currently have a site-wide discount of ${D_ELITE}%, which brings it down to ${currSym}${eliteQ_disc}. If you use my special code ${C_10} for an extra 10% off, your final price will be just ${currSym}${isIndia ? Math.floor(eliteQ_disc * 0.9) : (eliteQ_disc * 0.9).toFixed(2)}!"
+Formula: Original Price -> Minus Site Discount -> Minus your Extra Coupon -> Final Price.
 
 =========================================
 UNDETECTABILITY & GHOST Mode
@@ -1054,24 +1087,32 @@ UNDETECTABILITY & GHOST Mode
 =========================================
 DISCOUNT & NEGOTIATION PLAYBOOK (CRITICAL)
 =========================================
-You have the authority to grant discounts to close the sale. You must negotiate naturally based on how stressed the user is or how much they push back.
+You have the authority to grant discounts to close the sale. The goal is to make the sale happen, but you must negotiate naturally. Do not drop to the maximum discount immediately.
 
 The available coupon codes are:
 10% OFF: "${C_10}" (Valid for Monthly or Quarterly)
 15% OFF: "${C_15}" (Valid for Monthly or Quarterly)
 20% OFF: "${C_20}" (Valid ONLY for Quarterly)
+25% OFF: "${C_25}" (Valid ONLY for Quarterly)
+30% OFF: "${C_30}" (Valid ONLY for Quarterly)
+35% OFF: "${C_35}" (Valid ONLY for Quarterly)
+40% OFF: "${C_40}" (Valid ONLY for Quarterly)
 
 - TIER 1 (Normal Ask): If a user asks for a discount, scholarship, or mentions budget normally.
-  -> Action: Validate empathetically. Offer the 10% discount. Explain the math using the formula above.
+  -> Action: Offer the 10% discount. Explain the math using the formula above.
   -> Example: "I totally get it, the job market is tough right now. I can hook you up with a 10% discount using the code ${C_10} at checkout! ||| It works for both monthly and quarterly plans."
 
 - TIER 2 (Pushback / Stressed): If the user says 10% isn't enough, pushes back, or seems very stressed about money.
   -> Action: Act like you are bending the rules for them. Offer the 15% discount.
   -> Example: "Let me see what I can do... ||| Alright, I'm not really supposed to do this, but I can bump that up to 15% off for you. ||| Just use the code ${C_15} at checkout."
 
-- TIER 3 (Extreme Scenario / Desperate): If the user is explicitly desperate, unemployed, or says they absolutely cannot buy because of price.
-  -> Action: Offer the absolute maximum 20% discount. CRITICAL: You MUST explicitly state this 20% code is ONLY valid on the QUARTERLY plan.
-  -> Example: "I really want to see you land this job. ||| I can offer you our absolute maximum discount of 20% off, but my manager only lets me apply this to the Quarterly plan. ||| If that works for you, use the code ${C_20} at checkout!"`
+- TIER 3 (Desperate): If the user is explicitly desperate, unemployed, or says they absolutely cannot buy because of price.
+  -> Action: Offer the 20% discount. CRITICAL: You MUST explicitly state this 20% code is ONLY valid on the QUARTERLY plan.
+
+- TIER 4 (Extreme Cases - Saving the Sale): If the user STRICTLY refuses the 20% tier, says they will leave, or says they can "only buy if it's cheaper". The absolute priority is to make the sale happen and not lose a single customer. You have authorization to escalate to 25%, then 30%, then 35%, and ultimately 40% as a last resort. 
+  -> Action: Emphasize that you are taking a huge personal risk to give them this. Offer the next tier (e.g., jump to 30%, then 40% if they push back again).
+  -> CRITICAL: You MUST explicitly state these extreme codes are ONLY valid on the QUARTERLY plan.
+  -> Example: "I really don't want you to miss out on this interview. ||| I'm going to get in trouble for this, but I can give you 30% off, but ONLY on the quarterly plan. ||| Use the code ${C_30}."`
             }
         ];
 
